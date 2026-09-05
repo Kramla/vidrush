@@ -1,0 +1,87 @@
+{
+  "id": "scriptflow-verified-render-intake",
+  "name": "Scriptflow - Verified Render Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "scriptflow-verified-render",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "d858dc80-cfe4-45c7-bcd8-343135e9b427",
+      "name": "Verified Render Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -560,
+        0
+      ],
+      "webhookId": "d858dc80-cfe4-45c7-bcd8-343135e9b427"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst request = $json;\nconst headers = request.headers || {};\nconst body = request.body || {};\nconst eventId = String(headers['x-scriptflow-event-id'] || '');\nconst timestamp = String(headers['x-scriptflow-timestamp'] || '');\nconst suppliedSignature = String(headers['x-scriptflow-signature'] || '').toLowerCase();\nconst secret = $env.N8N_SCRIPTFLOW_WEBHOOK_SECRET;\nconst now = Date.now();\nconst timestampMilliseconds = Number(timestamp) * 1000;\n\nif (!secret || !eventId || !Number.isFinite(timestampMilliseconds) || Math.abs(now - timestampMilliseconds) > 300000) {\n  throw new Error('Rejected Scriptflow event: missing secret, event id, or fresh timestamp.');\n}\n\nconst payload = JSON.stringify(body);\nconst expectedSignature = 'sha256=' + crypto.createHmac('sha256', secret).update(timestamp + '.' + payload).digest('hex');\nconst suppliedBuffer = Buffer.from(suppliedSignature);\nconst expectedBuffer = Buffer.from(expectedSignature);\n\nif (suppliedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(suppliedBuffer, expectedBuffer)) {\n  throw new Error('Rejected Scriptflow event: invalid HMAC signature.');\n}\n\nreturn [{ json: { ...body, verifiedBy: 'n8n-hmac', receivedAt: new Date().toISOString() } }];"
+      },
+      "id": "a40c4c52-1b5e-46b5-8be8-881c8e28c360",
+      "name": "Verify Scriptflow Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"accepted\":true,\"eventId\":$json.eventId,\"message\":\"Verified render received. Add a publishing destination after this node.\"}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "6e5f6b0a-b52b-4af1-b483-7c9bd1b9b04d",
+      "name": "Accept Verified Render",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Verified Render Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Scriptflow Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Scriptflow Signature": {
+      "main": [
+        [
+          {
+            "node": "Accept Verified Render",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "c65339c3-10e5-4e7d-86ca-2ed9379f2f53",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

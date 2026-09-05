@@ -1,0 +1,20 @@
+﻿# Dependencies & cache
+node_modules/
+.npm-cache/
+.n8n-npm-cache/
+
+# Environment & Secrets
+.env
+.env.*
+.env.local
+.env.n8n.local
+.env.providers.local
+
+# Runtime data & media output
+renders/
+generated-assets/
+.scriptflow-data/
+.n8n-data/
+
+# Logs
+*.log

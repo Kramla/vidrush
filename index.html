@@ -1,0 +1,1227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VidRush Studio | AI Long-Form Video Generator, Multi-Track Timeline & 1080p Renderer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Montserrat:wght@700;900&family=Anton&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="style.css?v=6.7">
+</head>
+<body class="dark-theme">
+
+  <!-- Top Navigation Header with Connected 5-Stage Stepper -->
+  <header class="app-header">
+    <div class="brand-group">
+      <div class="logo-badge">
+        <i class="fa-solid fa-bolt-lightning"></i>
+      </div>
+      <div class="brand-text">
+        <h1>Vid<span class="accent-text">Rush</span> <span class="badge-studio">STUDIO</span></h1>
+      </div>
+    </div>
+
+    <!-- 5-Stage Stepper Navigation -->
+    <nav class="stage-stepper-nav">
+      <button class="stage-step-btn active" data-stage="1" id="stepNav1">
+        <span class="step-num">1</span>
+        <span class="step-name"><i class="fa-solid fa-file-lines"></i> Script & Beats</span>
+      </button>
+      <div class="step-divider"></div>
+      <button class="stage-step-btn" data-stage="2" id="stepNav2">
+        <span class="step-num">2</span>
+        <span class="step-name"><i class="fa-solid fa-film"></i> Visuals & AI</span>
+      </button>
+      <div class="step-divider"></div>
+      <button class="stage-step-btn" data-stage="3" id="stepNav3">
+        <span class="step-num">3</span>
+        <span class="step-name"><i class="fa-solid fa-microphone-lines"></i> Voice & Audio</span>
+      </button>
+      <div class="step-divider"></div>
+      <button class="stage-step-btn" data-stage="4" id="stepNav4">
+        <span class="step-num">4</span>
+        <span class="step-name"><i class="fa-solid fa-sliders"></i> Studio Timeline</span>
+      </button>
+      <div class="step-divider"></div>
+      <button class="stage-step-btn" data-stage="5" id="stepNav5">
+        <span class="step-num">5</span>
+        <span class="step-name"><i class="fa-solid fa-clapperboard"></i> Render & Export</span>
+      </button>
+    </nav>
+
+    <!-- Header Tools & History Actions -->
+    <div class="header-actions">
+      <!-- Undo / Redo -->
+      <div class="header-history-actions">
+        <button id="undoBtn" class="btn btn-icon btn-sm" disabled title="Undo (Ctrl+Z)">
+          <i class="fa-solid fa-rotate-left"></i>
+        </button>
+        <button id="redoBtn" class="btn btn-icon btn-sm" disabled title="Redo (Ctrl+Y)">
+          <i class="fa-solid fa-rotate-right"></i>
+        </button>
+      </div>
+
+      <!-- Live Stats Chip -->
+      <div class="stats-chip" id="scriptStats">
+        <span><i class="fa-regular fa-clock"></i> <strong id="totalDuration">00:00</strong></span>
+        <span class="chip-divider"></span>
+        <span><i class="fa-solid fa-film"></i> <strong id="totalScenesCount">0</strong> Scenes</span>
+      </div>
+
+      <button id="newProjectBtn" class="btn btn-secondary btn-sm" title="Start New AI Video Project">
+        <i class="fa-solid fa-wand-magic-sparkles"></i> New
+      </button>
+
+      <button id="geminiChatBtn" class="btn btn-secondary btn-sm" title="See Gemini prompts and responses for this run">
+        <i class="fa-solid fa-comments"></i> Chat
+      </button>
+
+      <button id="flowQueueBtn" class="btn btn-secondary btn-sm" title="Export Gemini scene prompts for Google Flow Automator">
+        <i class="fa-solid fa-list-check"></i> Flow Queue
+      </button>
+
+      <button id="settingsBtn" class="btn btn-icon" title="Settings (ElevenLabs, Gemini, OpenAI, Stock Keys)">
+        <i class="fa-solid fa-gear"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= STAGE VIEWS CONTAINER ================= -->
+  <main class="studio-main-container">
+
+    <!-- =========================================================================
+         STAGE 1: 📝 SCRIPT & NARRATIVE BEATS
+         ========================================================================= -->
+    <section id="stageView1" class="stage-view active">
+      <div class="stage-view-inner stage-script-layout">
+        
+        <!-- Left: AI Director Prompter & Settings -->
+        <div class="script-prompt-col">
+          <div class="panel-card">
+            <div class="card-header">
+              <div class="card-title">
+                <i class="fa-solid fa-wand-magic-sparkles" style="color: var(--accent-cyan);"></i>
+                <h3>AI Director Scriptwriter</h3>
+              </div>
+              <span class="badge badge-accent" id="stage1ProviderBadge">AI: Auto</span>
+            </div>
+
+            <!-- Mode Selector (Prompt vs Manual Script) -->
+            <div class="script-mode-toggle">
+              <button id="modePromptBtn" class="mode-tab active"><i class="fa-solid fa-lightbulb"></i> Idea / Prompt</button>
+              <button id="modeManualBtn" class="mode-tab"><i class="fa-solid fa-pen-to-square"></i> Paste Full Script</button>
+            </div>
+
+            <!-- Prompt Box -->
+            <div id="directorPromptBox" class="prompt-box-wrapper">
+              <label for="directorPromptInput" class="form-label">Video Topic or Story Outline:</label>
+              <textarea id="directorPromptInput" class="form-input" rows="4" placeholder="Describe your video topic (e.g., 'A gripping documentary about Ancient Roman Gladiators and the secret training of the Colosseum')..."></textarea>
+
+              <div class="quick-chips-group">
+                <span class="chips-label">Quick Prompts:</span>
+                <div class="agent-chips">
+                  <button class="chip-btn" data-prompt="Create a high-retention documentary about Ancient Roman Gladiators in the Colosseum">
+                    ⚔️ Gladiator Arena
+                  </button>
+                  <button class="chip-btn" data-prompt="Create a 1-minute video explaining how to make natural spider repellent with peppermint oil">
+                    🕷️ Spider Remedy
+                  </button>
+                  <button class="chip-btn" data-prompt="Create a deep space documentary about supermassive black holes at the edge of the universe">
+                    🌌 Black Hole Mystery
+                  </button>
+                  <button class="chip-btn" data-prompt="Create a fast-paced true crime documentary about a legendary bank heist">
+                    💰 The Great Heist
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Manual Script Box -->
+            <div id="manualScriptBox" class="prompt-box-wrapper hidden">
+              <label for="manualScriptText" class="form-label">Paste Your Script Text:</label>
+              <textarea id="manualScriptText" class="form-input" rows="8" placeholder="Paste your full voiceover script here... Each sentence will be structured into a distinct visual beat."></textarea>
+            </div>
+
+            <!-- Project Parameters Grid -->
+            <div class="project-params-grid">
+              <div class="form-group">
+                <label for="projectThemeSelect"><i class="fa-solid fa-palette"></i> Visual Theme:</label>
+                <select id="projectThemeSelect" class="form-select">
+                  <option value="cinematic-documentary" selected>Cinematic Documentary</option>
+                  <option value="cyberpunk-neon">Cyberpunk & Sci-Fi</option>
+                  <option value="true-crime-noir">True Crime / Film Noir</option>
+                  <option value="viral-tiktok">Viral Fast-Paced / YouTube</option>
+                  <option value="nature-science">Nature & Deep Space</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="projectAspectSelect"><i class="fa-solid fa-crop-simple"></i> Aspect Ratio:</label>
+                <select id="projectAspectSelect" class="form-select">
+                  <option value="16:9" selected>16:9 Landscape (YouTube)</option>
+                  <option value="9:16">9:16 Vertical (Shorts / Reels)</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="brandProfileSelect"><i class="fa-solid fa-fingerprint"></i> Brand Profile:</label>
+                <div class="profile-control-row">
+                  <select id="brandProfileSelect" class="form-select">
+                    <option value="">Loading profiles...</option>
+                  </select>
+                  <button id="saveBrandProfileBtn" type="button" class="btn btn-secondary btn-sm" title="Save current visual, voice, caption, and sourcing defaults">
+                    <i class="fa-solid fa-floppy-disk"></i> Save
+                  </button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="rightsModeSelect"><i class="fa-solid fa-globe"></i> Media Discovery:</label>
+                <select id="rightsModeSelect" class="form-select">
+                  <option value="known-rights" selected>Known-rights sources only</option>
+                  <option value="allow-unknown">Broad configured discovery (rights may be unknown)</option>
+                </select>
+              </div>
+            </div>
+
+            <button id="generateScriptBtn" class="btn btn-primary btn-lg glow-button btn-block">
+              <i class="fa-solid fa-wand-magic-sparkles"></i> Generate & Dissect Script Beats
+            </button>
+          </div>
+        </div>
+
+        <!-- Right: Storyboard Beats Review Table -->
+        <div class="script-beats-col">
+          <div class="panel-card fill-height">
+            <div class="card-header">
+              <div class="card-title">
+                <i class="fa-solid fa-list-ol"></i>
+                <h3>Gemini-Decomposed Scene Beats (<span id="stage1BeatCount">0</span>)</h3>
+                <span id="stage1DecompositionBadge" class="badge badge-sm">Awaiting Gemini</span>
+              </div>
+              <button id="stage1AddBeatBtn" class="btn btn-secondary btn-sm">
+                <i class="fa-solid fa-plus"></i> Add Beat
+              </button>
+            </div>
+
+            <div class="beats-list-scroll" id="stage1BeatsList">
+              <div class="empty-state-card">
+                <i class="fa-solid fa-file-lines empty-icon"></i>
+                <h4>No Script Beats Yet</h4>
+                <p>Type a topic on the left and click <strong>Generate & Dissect Script Beats</strong> to build your narrative.</p>
+              </div>
+            </div>
+
+            <!-- Stage 1 Footer Navigation -->
+            <div class="stage-footer-bar">
+              <span class="text-muted"><i class="fa-brands fa-google"></i> Gemini selects every beat, visual format, and search query. You can edit before proceeding.</span>
+              <button id="toStage2Btn" class="btn btn-primary btn-lg glow-button" disabled>
+                Proceed to Visual Sourcing (Step 2) <i class="fa-solid fa-arrow-right"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         STAGE 2: 🎬 VISUAL SOURCING & AI GENERATION
+         ========================================================================= -->
+    <section id="stageView2" class="stage-view hidden">
+      <div class="stage-view-inner stage-visuals-layout">
+        
+        <div class="stage-sub-header">
+          <div>
+            <h2><i class="fa-solid fa-photo-film" style="color: var(--accent-cyan);"></i> Scene Visuals & Cinematography</h2>
+            <p class="subtitle">Each row is a Gemini decision: script chunk on the left, Gemini's exact visual search wording in the middle, and the selected visual on the right.</p>
+          </div>
+          <div class="sub-header-actions">
+            <label class="gemini-fallback-toggle" title="After Gemini tests every returned stock candidate and answers no to each one, create an original scene image.">
+              <input type="checkbox" id="stage2AutoGeminiFallback">
+              <span><i class="fa-brands fa-google"></i> Auto-generate after all Gemini no</span>
+            </label>
+            <button id="stage2RefreshAllBtn" class="btn btn-secondary btn-sm">
+              <i class="fa-solid fa-rotate"></i> Refresh All Stock
+            </button>
+          </div>
+        </div>
+
+        <!-- Storyboard Visuals Grid -->
+        <div class="visuals-cards-grid" id="stage2VisualsGrid"></div>
+
+        <!-- Stage 2 Footer Navigation -->
+        <div class="stage-footer-bar">
+          <button id="backToStage1Btn" class="btn btn-secondary btn-lg">
+            <i class="fa-solid fa-arrow-left"></i> Back to Script
+          </button>
+          <button id="toStage3Btn" class="btn btn-primary btn-lg glow-button">
+            Proceed to Voice & Audio (Step 3) <i class="fa-solid fa-arrow-right"></i>
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         STAGE 3: 🎙️ VOICEOVER & AUDIO ENGINE
+         ========================================================================= -->
+    <section id="stageView3" class="stage-view hidden">
+      <div class="stage-view-inner stage-audio-layout">
+        
+        <div class="stage-sub-header">
+          <div>
+            <h2><i class="fa-solid fa-microphone-lines" style="color: var(--accent-cyan);"></i> Neural Voiceover & Audio Mixing</h2>
+            <p class="subtitle">Select your voice actor, choose ambient background music, and configure automatic speech ducking.</p>
+          </div>
+        </div>
+
+        <div class="audio-controls-grid">
+          <!-- Voiceover Engine Card -->
+          <div class="panel-card">
+            <div class="card-header">
+              <div class="card-title">
+                <i class="fa-solid fa-microphone"></i>
+                <h3>Voiceover Narration Engine</h3>
+              </div>
+              <span class="badge badge-accent" id="stage3VoiceBadge">Active</span>
+            </div>
+
+            <div class="card-body">
+              <div class="form-group">
+                <label for="stage3VoiceSelect">Select Voice Actor:</label>
+                <div class="voice-select-row">
+                  <select id="stage3VoiceSelect" class="form-select">
+                    <option value="pNInz6obpgDQGcFmaJgB">Adam (Deep Documentary Male)</option>
+                    <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Calm Narrative Female)</option>
+                    <option value="ErXwobaYiN019PkySvjV">Antoni (Energetic Explainer Male)</option>
+                    <option value="TxGEqnHWrfWFTfGW9XjX">Josh (Deep American Male)</option>
+                    <option value="EXAVITQu4vr4xnSDxMaL">Bella (Engaging Female)</option>
+                    <option value="VR6AewLTigWG4xSOukaG">Arnold (Crisp Narrative Male)</option>
+                  </select>
+                  <button id="stage3PreviewVoiceBtn" class="btn btn-secondary" title="Preview Voice Actor">
+                    <i class="fa-solid fa-volume-high"></i> Sample
+                  </button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="stage3VoiceProvider">Provider Engine:</label>
+                <select id="stage3VoiceProvider" class="form-select">
+                  <option value="windows-sapi" selected>Windows SAPI / Neural TTS (Local Offline)</option>
+                  <option value="elevenlabs">ElevenLabs Neural Voice (Requires API Key)</option>
+                </select>
+              </div>
+
+              <div class="settings-hint">
+                <i class="fa-solid fa-circle-info"></i> ElevenLabs API keys can be saved in the top-right Settings menu.
+              </div>
+            </div>
+          </div>
+
+          <!-- Background Music & Ducking Card -->
+          <div class="panel-card">
+            <div class="card-header">
+              <div class="card-title">
+                <i class="fa-solid fa-music"></i>
+                <h3>Background Music & Ducking</h3>
+              </div>
+            </div>
+
+            <div class="card-body">
+              <div class="form-group">
+                <label for="stage3BgmTrackSelect">Cinematic Music Track:</label>
+                <select id="stage3BgmTrackSelect" class="form-select">
+                  <option value="ambient-cinematic" selected>Cinematic Ambient Harmonic Bed (Default)</option>
+                  <option value="epic-documentary">Epic Historical Documentary</option>
+                  <option value="cyberpunk-synth">Cyberpunk Neon Synth Pad</option>
+                  <option value="lofi-chill">Lo-Fi Atmospheric Chill</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <div class="label-with-val">
+                  <label for="stage3BgmVolume"><i class="fa-solid fa-sliders"></i> BGM Ducking Level During Speech:</label>
+                  <strong id="stage3BgmVolDisplay" class="accent-text">15%</strong>
+                </div>
+                <input type="range" id="stage3BgmVolume" min="0.05" max="0.5" step="0.05" value="0.15" class="range-slider">
+                <p class="field-help">Music automatically attenuates to this volume when voiceover narration speaks.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Scene Audio Preview List -->
+        <div class="panel-card" style="margin-top: 16px;">
+          <div class="card-header">
+            <div class="card-title">
+              <i class="fa-solid fa-headphones"></i>
+              <h3>Scene Narration Audio Previews</h3>
+            </div>
+          </div>
+          <div class="audio-scene-list" id="stage3AudioSceneList"></div>
+        </div>
+
+        <!-- Stage 3 Footer Navigation -->
+        <div class="stage-footer-bar">
+          <button id="backToStage2Btn" class="btn btn-secondary btn-lg">
+            <i class="fa-solid fa-arrow-left"></i> Back to Visuals
+          </button>
+          <button id="toStage4Btn" class="btn btn-primary btn-lg glow-button">
+            Proceed to Studio Timeline (Step 4) <i class="fa-solid fa-arrow-right"></i>
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         STAGE 4: 🎛️ STUDIO EDITOR, MULTI-TRACK TIMELINE & RUSH COPILOT
+         ========================================================================= -->
+    <section id="stageView4" class="stage-view hidden">
+      <div class="stage-view-inner studio-stage4-container">
+        
+        <!-- 3-Column Studio Grid -->
+        <div class="studio-workspace">
+
+          <!-- Left Column: Rush In-Editor Copilot Agent -->
+          <aside class="studio-panel left-agent-panel">
+            <div class="panel-header agent-header">
+              <div class="agent-badge">
+                <div class="agent-avatar"><i class="fa-solid fa-robot"></i></div>
+                <div>
+                  <h3>Gemini Timeline Director</h3>
+                  <p class="agent-status"><span class="status-dot"></span> Review → Apply → video-use EDL</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Quick In-Editor Suggestion Chips -->
+            <div class="agent-chips-wrap">
+              <span class="chips-label">Quick Gemini Commands:</span>
+              <div class="agent-chips">
+                <button class="chip-btn" data-prompt="Change scene 1 visual to ancient Roman Colosseum">🎥 Swap Scene 1</button>
+                <button class="chip-btn" data-prompt="Make the opening hook 10x more dramatic">🔥 Polish Hook</button>
+                <button class="chip-btn" data-prompt="Change captions to Hormozi yellow">🎨 Hormozi</button>
+                <button class="chip-btn" data-prompt="Change captions to Cyberpunk Neon">⚡ Neon Glow</button>
+                <button class="chip-btn" data-prompt="Set music volume to 20%">🎵 BGM 20%</button>
+                <button class="chip-btn" data-prompt="Trim scene 2 duration to 5s">⏱️ Trim Scene 2</button>
+              </div>
+            </div>
+
+            <!-- Chat Feed -->
+            <div class="chat-feed" id="chatFeed">
+              <div class="chat-msg bot-msg">
+                <div class="msg-content">
+                  ⚡ <strong>Rush In-Editor Agent Active!</strong>
+                  <br><br>
+                  Tell Gemini how to refine the timeline. It proposes exact edits for your review before anything changes:
+                  <ul>
+                    <li><em>"Change scene 2 visual to ancient armor"</em></li>
+                    <li><em>"Make the hook more dramatic"</em></li>
+                    <li><em>"Change captions to Neon"</em></li>
+                    <li><em>"Trim scene 3 duration to 5s"</em></li>
+                  </ul>
+                  <em>Approved changes become one undoable transaction and compile into the final video-use EDL.</em>
+                </div>
+              </div>
+            </div>
+
+            <!-- Input Bar -->
+            <div class="chat-input-deck">
+              <div class="chat-input-wrapper">
+                <textarea id="chatInputArea" placeholder="Tell Gemini what to edit (pacing, order, duration, motion, visuals, captions, or music)..." rows="3"></textarea>
+                <div class="chat-input-footer">
+                  <span class="key-hint"><i class="fa-solid fa-keyboard"></i> Enter to send</span>
+                  <button id="sendChatBtn" class="btn btn-primary btn-sm">
+                    <i class="fa-solid fa-paper-plane"></i> Send
+                  </button>
+                </div>
+              </div>
+            </div>
+          </aside>
+
+          <!-- Center Column: 16:9 Stage Video Player Canvas -->
+          <section class="studio-panel center-stage-panel">
+            <div class="stage-viewport-header">
+              <div class="stage-title">
+                <i class="fa-solid fa-circle-play"></i>
+                <span id="activeProjectTitle">Project Stage Preview</span>
+              </div>
+              <div class="stage-badges">
+                <span class="badge" id="playerCurrentSceneBadge">Scene 0 / 0</span>
+                <span class="badge badge-accent" id="activeThemeBadge">Cinematic</span>
+              </div>
+            </div>
+
+            <div class="video-viewport-wrapper">
+              <div class="video-viewport" id="videoViewport">
+                <video id="playerVideoEl" class="stage-media stage-video" playsinline muted></video>
+                <img id="playerImageEl" class="stage-media stage-image" alt="No scene media selected">
+                
+                <!-- Real-Time Kinetic Subtitles Overlay -->
+                <div class="captions-overlay pos-bottom preset-hormozi" id="captionsOverlay">
+                  <span id="captionText">Preview your video storyboard</span>
+                </div>
+
+                <!-- HUD Watermark / Timer -->
+                <div class="hud-timer" id="hudTimer">00:00 / 00:00</div>
+
+                <!-- Empty State Overlay -->
+                <div id="emptyStageOverlay" class="empty-stage-overlay">
+                  <div class="empty-stage-card">
+                    <i class="fa-solid fa-wand-magic-sparkles empty-icon"></i>
+                    <h3>Your Storyboard will appear here</h3>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Stage Transport Controls Bar -->
+              <div class="stage-controls-bar">
+                <div class="transport-group">
+                  <button id="playPauseBtn" class="control-btn play-btn" title="Play/Pause Storyboard" disabled>
+                    <i class="fa-solid fa-play"></i>
+                  </button>
+                  <button id="prevSceneBtn" class="control-btn" title="Previous Scene" disabled>
+                    <i class="fa-solid fa-backward-step"></i>
+                  </button>
+                  <button id="nextSceneBtn" class="control-btn" title="Next Scene" disabled>
+                    <i class="fa-solid fa-forward-step"></i>
+                  </button>
+                </div>
+
+                <div class="scrubber-wrapper">
+                  <div class="timeline-bar" id="timelineBar">
+                    <div class="timeline-progress" id="timelineProgress"></div>
+                  </div>
+                </div>
+
+                <div class="utility-group">
+                  <div class="volume-control">
+                    <button id="muteToggleBtn" class="control-btn" title="Mute/Unmute">
+                      <i class="fa-solid fa-volume-high"></i>
+                    </button>
+                    <input type="range" id="volumeSlider" min="0" max="1" step="0.05" value="0.9" class="range-slider">
+                  </div>
+
+                  <!-- Subtitle Preset Quick Switcher -->
+                  <div class="caption-preset-quick">
+                    <select id="captionPresetSelect" class="form-select form-select-sm" title="Kinetic Caption Style">
+                      <option value="hormozi" selected>Hormozi (Yellow Active)</option>
+                      <option value="beast">MrBeast (Bold White/Yellow)</option>
+                      <option value="neon">Cyberpunk Neon (Cyan Glow)</option>
+                      <option value="minimal">Clean Minimal</option>
+                    </select>
+                  </div>
+
+                  <button id="toggleCaptionsBtn" class="control-btn active" title="Toggle Subtitles">
+                    <i class="fa-solid fa-closed-captioning"></i>
+                  </button>
+
+                  <button id="fullscreenBtn" class="control-btn" title="Fullscreen">
+                    <i class="fa-solid fa-expand"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Right Column: Active Scene Card Inspector -->
+          <aside class="studio-panel right-inspector-panel">
+            <div class="panel-header inspector-header">
+              <div class="panel-title">
+                <i class="fa-solid fa-sliders"></i>
+                <h3>Scene Inspector</h3>
+              </div>
+              <span class="badge badge-accent" id="inspectorSceneNumberBadge">Scene #1</span>
+            </div>
+
+            <div class="inspector-content" id="inspectorContent">
+              <div id="inspectorEmptyState" class="inspector-empty">
+                <i class="fa-solid fa-clapperboard"></i>
+                <p>Select any scene in the timeline below to inspect and customize its media, script, and cinematography.</p>
+              </div>
+
+              <div id="inspectorActiveScene" class="inspector-scene-body hidden">
+                <div class="inspector-section">
+                  <div class="inspector-field-header">
+                    <label><i class="fa-solid fa-camera"></i> Shot Direction:</label>
+                    <span class="badge badge-sm" id="inspectorShotTypeBadge">Macro Shot</span>
+                  </div>
+                  <p class="director-reasoning-text" id="inspectorDirectorReasoning">Visual creates narrative momentum.</p>
+                </div>
+
+                <div class="inspector-section">
+                  <div class="inspector-field-header">
+                    <label for="inspectorSceneText"><i class="fa-solid fa-comment-dots"></i> Narration Script:</label>
+                    <span class="text-counter" id="inspectorWordCount">14 words</span>
+                  </div>
+                  <textarea id="inspectorSceneText" class="form-input" rows="3"></textarea>
+                </div>
+
+                <div class="inspector-section">
+                  <label><i class="fa-solid fa-photo-film"></i> Active Visual:</label>
+                  <div class="current-media-preview-card" id="inspectorMediaCard">
+                    <img id="inspectorMediaThumb" src="" alt="Scene Visual">
+                    <div class="media-meta-overlay">
+                      <span class="media-type-pill" id="inspectorMediaTypePill">Video HD</span>
+                      <span class="media-source-title" id="inspectorMediaSourceTitle">Stock</span>
+                    </div>
+                  </div>
+
+                  <div class="media-actions-grid">
+                    <button id="inspectorSearchStockBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-magnifying-glass"></i> Stock</button>
+                    <button id="inspectorAiGenBtn" class="btn btn-secondary btn-sm"><i class="fa-brands fa-google" style="color: #4285f4;"></i> Gemini Image</button>
+                    <button id="inspectorUploadBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-upload"></i> Upload</button>
+                    <button id="inspectorCopyPromptBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-copy"></i> Prompt</button>
+                  </div>
+                </div>
+
+                <div class="inspector-section">
+                  <label><i class="fa-solid fa-layer-group"></i> Alternate Candidates:</label>
+                  <div class="candidates-carousel" id="inspectorCandidatesGrid"></div>
+                </div>
+
+                <div class="inspector-section scene-timing-row">
+                  <div class="timing-input-group">
+                    <label for="inspectorDurationInput"><i class="fa-regular fa-clock"></i> Duration (s):</label>
+                    <input type="number" id="inspectorDurationInput" min="1.5" max="60" step="0.5" value="4.0" class="form-input form-input-sm">
+                  </div>
+                  <div class="scene-nav-buttons">
+                    <button id="inspectorPrevSceneBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-chevron-left"></i></button>
+                    <button id="inspectorNextSceneBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-chevron-right"></i></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </aside>
+
+        </div>
+
+        <!-- Bottom: Multi-Track Timeline -->
+        <footer class="timeline-studio-deck">
+          <div class="timeline-deck-header">
+            <div class="deck-title">
+              <i class="fa-solid fa-sliders"></i>
+              <strong>Multi-Track Production Timeline</strong>
+              <span class="badge badge-accent">Drag clip handles to retime &bull; Click to seek</span>
+            </div>
+            <div class="deck-actions">
+              <span id="tlDurationLabel"><i class="fa-regular fa-clock"></i> Total Duration: 00:00</span>
+              <button id="addCustomSceneBtn" class="btn btn-secondary btn-sm">
+                <i class="fa-solid fa-plus"></i> Add Scene
+              </button>
+            </div>
+          </div>
+
+          <div class="timeline-viewport">
+            <div class="timeline-ruler" id="timeRuler"></div>
+            <div class="timeline-tracks-area" id="timelineTracks">
+              <div class="empty-timeline-hint">Your video timeline tracks will display here.</div>
+            </div>
+          </div>
+        </footer>
+
+        <!-- Stage 4 Footer Navigation -->
+        <div class="stage-footer-bar">
+          <button id="backToStage3Btn" class="btn btn-secondary btn-lg">
+            <i class="fa-solid fa-arrow-left"></i> Back to Audio
+          </button>
+          <button id="toStage5Btn" class="btn btn-primary btn-lg glow-button">
+            Proceed to Render & Export (Step 5) <i class="fa-solid fa-arrow-right"></i>
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         STAGE 5: 🚀 1080P RENDER & EXPORT HUB
+         ========================================================================= -->
+    <section id="stageView5" class="stage-view hidden">
+      <div class="stage-view-inner stage-export-layout">
+        
+        <div class="stage-sub-header">
+          <div>
+            <h2><i class="fa-solid fa-clapperboard" style="color: var(--accent-cyan);"></i> Render & Export Hub</h2>
+            <p class="subtitle">Compile the approved Gemini timeline into a video-use EDL, then render and verify the final 1080p MP4.</p>
+          </div>
+        </div>
+
+        <div class="export-hub-grid">
+          <!-- 1080p FFmpeg Render Panel -->
+          <div class="panel-card render-engine-card">
+            <div class="card-header">
+              <div class="card-title">
+                <i class="fa-solid fa-film" style="color: var(--accent-cyan);"></i>
+                <h3>1080p Full HD Video Render</h3>
+              </div>
+              <span class="badge badge-accent">video-use Backbone</span>
+            </div>
+
+            <div class="card-body">
+              <div id="renderHubInitialBox" class="render-hub-action-box">
+                <p>Uses ElevenLabs timing, materializes every visual beat, writes a video-use EDL, adds cut-edge fades, normalizes loudness, and applies subtitles last.</p>
+                <button id="renderMp4MainBtn" class="btn btn-primary btn-lg glow-button btn-block">
+                  <i class="fa-solid fa-clapperboard"></i> Render with video-use
+                </button>
+              </div>
+
+              <!-- Live Render Spinner / State -->
+              <div id="renderHubProgressBox" class="render-loading-box hidden">
+                <div class="spinner"></div>
+                <h4 id="renderHubStatusText">video-use is extracting EDL segments, applying audio fades, concatenating, and verifying the final edit...</h4>
+                <p class="text-muted">Official video-use renderer with local FFmpeg and ElevenLabs timing.</p>
+              </div>
+
+              <!-- Render Complete Success Box -->
+              <div id="renderHubSuccessBox" class="render-success-box hidden">
+                <div class="rendered-video-preview">
+                  <video id="renderedVideoPreviewEl" controls autoplay playsinline></video>
+                </div>
+
+                <div class="render-stats-row">
+                  <span><i class="fa-solid fa-circle-check" style="color: var(--accent-green);"></i> <strong>Render Complete!</strong></span>
+                  <span id="renderedDurationLabel"><i class="fa-regular fa-clock"></i> 00:00</span>
+                  <span id="renderedResolutionLabel"><i class="fa-solid fa-tv"></i> 1080p Full HD</span>
+                </div>
+
+                <div class="render-download-actions">
+                  <a id="downloadRenderedMp4Link" href="#" download="vidrush-video.mp4" class="btn btn-primary btn-lg glow-button">
+                    <i class="fa-solid fa-download"></i> Download 1080p MP4 Video
+                  </a>
+                  <button id="copyVideoLinkBtn" class="btn btn-secondary">
+                    <i class="fa-solid fa-link"></i> Copy Video Link
+                  </button>
+                </div>
+                <section id="n8nAutomationPanel" class="render-automation-panel hidden" aria-live="polite">
+                  <div class="render-automation-heading">
+                    <span><i class="fa-solid fa-diagram-project"></i> n8n Publishing Automation</span>
+                    <span id="n8nAutomationStatusBadge" class="automation-status-badge">Not configured</span>
+                  </div>
+                  <p id="n8nAutomationStatusText">Publishing status will appear after the render completes.</p>
+                  <div class="render-automation-actions">
+                    <button id="approveN8nPublishingBtn" class="btn btn-primary hidden">
+                      <i class="fa-solid fa-shield-check"></i> Approve & Queue Publishing
+                    </button>
+                    <button id="refreshN8nStatusBtn" class="btn btn-secondary btn-sm">
+                      <i class="fa-solid fa-rotate"></i> Refresh Status
+                    </button>
+                    <a id="n8nPublishedVideoLink" class="btn btn-secondary btn-sm hidden" target="_blank" rel="noopener noreferrer">
+                      <i class="fa-solid fa-arrow-up-right-from-square"></i> Open Published Video
+                    </a>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+
+          <!-- Multi-Format Export Downloads Card -->
+          <div class="panel-card export-suite-card">
+            <div class="card-header">
+              <div class="card-title">
+                <i class="fa-solid fa-cloud-arrow-down"></i>
+                <h3>Project Files & Subtitle Exports</h3>
+              </div>
+            </div>
+
+            <div class="card-body export-buttons-list">
+              <button class="export-action-card" id="exportSrtBtn">
+                <div class="export-icon"><i class="fa-regular fa-closed-captioning"></i></div>
+                <div class="export-meta">
+                  <strong>Timed Subtitles (.SRT)</strong>
+                  <span>Standard subtitle format with word/sentence timestamps</span>
+                </div>
+                <i class="fa-solid fa-download"></i>
+              </button>
+
+              <button class="export-action-card" id="exportVttBtn">
+                <div class="export-icon"><i class="fa-solid fa-closed-captioning"></i></div>
+                <div class="export-meta">
+                  <strong>WebVTT Subtitles (.VTT)</strong>
+                  <span>HTML5 Web Video text track format</span>
+                </div>
+                <i class="fa-solid fa-download"></i>
+              </button>
+
+              <button class="export-action-card" id="exportJsonBtn">
+                <div class="export-icon"><i class="fa-solid fa-file-code"></i></div>
+                <div class="export-meta">
+                  <strong>Project Manifest (.JSON)</strong>
+                  <span>Complete schema for VidRush / Remotion / CapCut / Premiere</span>
+                </div>
+                <i class="fa-solid fa-download"></i>
+              </button>
+
+              <button class="export-action-card" id="exportScriptTxtBtn">
+                <div class="export-icon"><i class="fa-solid fa-file-lines"></i></div>
+                <div class="export-meta">
+                  <strong>Production Script & Shot List (.TXT)</strong>
+                  <span>Dissected narration beats and director shot directions</span>
+                </div>
+                <i class="fa-solid fa-download"></i>
+              </button>
+
+              <button class="export-action-card" id="exportMediaListBtn">
+                <div class="export-icon"><i class="fa-solid fa-list-check"></i></div>
+                <div class="export-meta">
+                  <strong>Media Provenance & License CSV</strong>
+                  <span>Asset attribution, URLs, and commercial license list</span>
+                </div>
+                <i class="fa-solid fa-download"></i>
+              </button>
+
+              <button class="export-action-card" id="openN8nAutomationBtn">
+                <div class="export-icon"><i class="fa-solid fa-diagram-project" style="color: #f97316;"></i></div>
+                <div class="export-meta">
+                  <strong>n8n Publishing Automation</strong>
+                  <span>Review signed publishing configuration and render status</span>
+                </div>
+                <i class="fa-solid fa-bolt"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stage 5 Footer Navigation -->
+        <div class="stage-footer-bar">
+          <button id="backToStage4Btn" class="btn btn-secondary btn-lg">
+            <i class="fa-solid fa-arrow-left"></i> Back to Studio Timeline
+          </button>
+          <button id="startNewProjectFooterBtn" class="btn btn-secondary btn-lg">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> Start New Project
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ================= MODALS & OVERLAYS ================= -->
+
+  <!-- 1. Preflight & Parameter Check Modal -->
+  <div id="geminiTraceModal" class="modal-backdrop hidden">
+    <div class="modal-card gemini-trace-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-brands fa-google" style="color: #4285f4;"></i>
+          <h3>Gemini Operation Chat</h3>
+          <span class="badge badge-accent" id="geminiTraceRunLabel">No active run</span>
+        </div>
+        <button class="modal-close" id="closeGeminiTraceBtn" aria-label="Close Gemini operation chat">&times;</button>
+      </div>
+      <div class="modal-body gemini-trace-body">
+        <p class="settings-help">Every server-side Gemini prompt and response for this project run appears here. API keys and binary media are never shown.</p>
+        <div id="geminiTraceEmpty" class="gemini-trace-empty">Start a generation to create a Gemini operation trace.</div>
+        <div id="geminiTraceFeed" class="gemini-trace-feed"></div>
+      </div>
+      <div class="modal-actions-bar gemini-trace-actions">
+        <button id="refreshGeminiTraceBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-rotate"></i> Refresh</button>
+        <button id="closeGeminiTraceFooterBtn" class="btn btn-primary btn-sm">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="preflightModal" class="modal-backdrop hidden">
+    <div class="modal-card preflight-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-file-invoice-dollar" style="color: var(--accent-cyan);"></i>
+          <h3>VidRush Preflight & Production Parameter Check</h3>
+        </div>
+        <button class="modal-close" id="closePreflightBtn">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <p class="settings-help">The Director Agent has evaluated your prompt and prepared the production parameters:</p>
+
+        <div class="quote-grid">
+          <div class="quote-item">
+            <span class="quote-label">Project Title</span>
+            <strong class="quote-value" id="quoteTitle">Documentary Project</strong>
+          </div>
+          <div class="quote-item">
+            <span class="quote-label">Target Duration</span>
+            <strong class="quote-value" id="quoteDuration">01:30 (~90s)</strong>
+          </div>
+          <div class="quote-item">
+            <span class="quote-label">Visual Scenes</span>
+            <strong class="quote-value" id="quoteScenes">6 Scene Beats</strong>
+          </div>
+          <div class="quote-item">
+            <span class="quote-label">Visual Model</span>
+            <strong class="quote-value" id="quoteModel">Pro HD Stock & Cinema B-Roll</strong>
+          </div>
+          <div class="quote-item">
+            <span class="quote-label">Voiceover Engine</span>
+            <strong class="quote-value" id="quoteVoice">ElevenLabs Neural / SAPI</strong>
+          </div>
+          <div class="quote-item">
+            <span class="quote-label">Generation Cost</span>
+            <strong class="quote-value accent-text" id="quoteCost">Free Local (0 Credits)</strong>
+          </div>
+        </div>
+
+        <div id="quoteWarnings" class="preflight-warnings" aria-live="polite"></div>
+
+        <div class="quote-policy-box">
+          <i class="fa-solid fa-shield-halved"></i>
+          <span><strong>Sourcing policy:</strong> Known-rights mode records license evidence. Broad discovery may include unknown-rights candidates and blocks automatic publishing until reviewed.</span>
+        </div>
+
+        <div class="modal-actions-bar">
+          <button id="cancelPreflightBtn" class="btn btn-secondary">Edit Prompt</button>
+          <button id="confirmGenerateBtn" class="btn btn-primary glow-button">
+            <i class="fa-solid fa-wand-magic-sparkles"></i> Approve & Generate Storyboard
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Multi-Stage Generation Progress Overlay -->
+  <div id="generationProgressModal" class="modal-backdrop hidden">
+    <div class="modal-card generation-progress-card">
+      <div class="generation-progress-header">
+        <div class="spinner"></div>
+        <h3 id="generationProgressTitle">Generating VidRush Production Storyboard...</h3>
+        <p id="generationProgressSubtitle">Our agentic pipeline is building your multi-track timeline.</p>
+      </div>
+
+      <div class="pipeline-stages-list">
+        <div class="stage-step active" id="stageStep1">
+          <div class="step-icon"><i class="fa-solid fa-magnifying-glass"></i></div>
+          <div class="step-text">
+            <strong>1. Gemini Narrative Direction</strong>
+            <span>Creating or validating the narration before visual planning</span>
+          </div>
+        </div>
+        <div class="stage-step" id="stageStep2">
+          <div class="step-icon"><i class="fa-solid fa-scissors"></i></div>
+          <div class="step-text">
+            <strong>2. Gemini Narration Segmentation</strong>
+            <span>Preserving exact words in complete visualizable units</span>
+          </div>
+        </div>
+        <div class="stage-step" id="stageStep3">
+          <div class="step-icon"><i class="fa-solid fa-clapperboard"></i></div>
+          <div class="step-text">
+            <strong>3. Gemini Visual Direction</strong>
+            <span>Choosing a literal visual type and exact media search wording</span>
+          </div>
+        </div>
+        <div class="stage-step" id="stageStep4">
+          <div class="step-icon"><i class="fa-solid fa-film"></i></div>
+          <div class="step-text">
+            <strong>4. Media Retrieval & Pixel Verification</strong>
+            <span>Testing copied images and video frames against the locked contract</span>
+          </div>
+        </div>
+        <div class="stage-step" id="stageStep5">
+          <div class="step-icon"><i class="fa-solid fa-sliders"></i></div>
+          <div class="step-text">
+            <strong>5. Multi-Track Timeline Assembly</strong>
+            <span>Composing visuals, audio waveform, BGM ducking & subtitles</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Asset Search & AI Image Generator Modal -->
+  <div id="assetSearchModal" class="modal-backdrop hidden">
+    <div class="modal-card asset-modal-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <h3>Search Stock Footage or Generate with AI</h3>
+          <span class="badge" id="modalSceneNumBadge">Scene #1</span>
+        </div>
+        <button class="modal-close" id="closeAssetModalBtn">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="modal-search-bar">
+          <div class="search-input-wrapper">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <input type="text" id="modalSearchInput" placeholder="Search keywords (e.g., gladiator arena, drone ocean, peppermint oil)...">
+            <button id="modalSearchBtn" class="btn btn-primary">Search</button>
+          </div>
+
+          <div class="search-tabs">
+            <button class="search-tab active" data-source="all"><i class="fa-solid fa-layer-group"></i> All Media</button>
+            <button class="search-tab" data-source="video"><i class="fa-solid fa-video"></i> HD Videos</button>
+            <button class="search-tab" data-source="image"><i class="fa-solid fa-image"></i> 4K Photos</button>
+            <button class="search-tab" data-source="gemini-image"><i class="fa-solid fa-wand-magic-sparkles" style="color: #22d3ee;"></i> AI Image</button>
+            <button class="search-tab" data-source="gemini-veo-video"><i class="fa-solid fa-film" style="color: #22d3ee;"></i> AI Video</button>
+            <button class="search-tab" data-source="custom-upload"><i class="fa-solid fa-upload"></i> Custom Upload</button>
+            <button class="search-tab" data-source="ai-prompts"><i class="fa-solid fa-brain"></i> AI Prompts</button>
+          </div>
+        </div>
+
+        <div id="modalMediaResultsGrid" class="media-results-grid"></div>
+
+        <!-- AI Image Generation Section -->
+        <div id="modalGoogleFlowAiSection" class="google-flow-ai-box hidden">
+          <div class="ai-gen-header">
+            <h4><i class="fa-solid fa-wand-magic-sparkles" style="color: #22d3ee;"></i> AI Image Generator</h4>
+            <p>Gemini directs the prompt and verifies the pixels. Choose a free route or the paid Gemini API.</p>
+          </div>
+          <div class="generation-provider-row">
+            <label for="imageGenerationProvider">Generation route</label>
+            <select id="imageGenerationProvider" class="form-select">
+              <option value="pollinations">Pollinations free-account allowance</option>
+              <option value="google-flow">Google Flow free daily credits</option>
+              <option value="gemini">Gemini Image API (paid)</option>
+            </select>
+          </div>
+          <p id="geminiImageAccessStatus" class="gemini-video-status">Checking whether this API key exposes Gemini image models...</p>
+          <div class="ai-gen-form">
+            <textarea id="googleFlowPromptInput" class="form-input" rows="3" placeholder="Gemini's precise image prompt for this scene..."></textarea>
+            <button id="triggerGoogleFlowGenBtn" class="btn btn-primary">
+              <i class="fa-solid fa-wand-magic-sparkles"></i> Generate AI Image
+            </button>
+          </div>
+          <div class="free-generation-actions">
+            <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noopener" class="btn btn-secondary btn-sm"><i class="fa-solid fa-key"></i> Get Free Pollinations Key</a>
+            <button id="importGoogleFlowImageBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-file-import"></i> Import Flow Image + Verify</button>
+            <input id="googleFlowImageImportInput" type="file" accept="image/*" hidden>
+          </div>
+          <div id="googleFlowAiResultBox" class="ai-gen-result-preview hidden">
+            <h5>Generated Image + Gemini Review:</h5>
+            <img id="googleFlowGeneratedImg" src="" alt="Gemini-generated scene image">
+            <p id="geminiImageVerificationText" class="gemini-video-verification"></p>
+            <button id="applyGoogleFlowAssetBtn" class="btn btn-accent btn-sm" disabled>
+              <i class="fa-solid fa-check"></i> Apply to Scene
+            </button>
+          </div>
+        </div>
+
+        <div id="modalGeminiVeoSection" class="gemini-video-box hidden">
+          <div class="ai-gen-header">
+            <h4><i class="fa-solid fa-film" style="color: #22d3ee;"></i> AI Video Generator</h4>
+            <p>Use a free-account generator or Google Flow credits. Every downloaded clip is frame-checked by Gemini before it can be applied.</p>
+          </div>
+          <div class="generation-provider-row">
+            <label for="videoGenerationProvider">Generation route</label>
+            <select id="videoGenerationProvider" class="form-select">
+              <option value="pollinations">Pollinations account allowance (Nova Reel)</option>
+              <option value="google-flow">Google Flow free daily credits</option>
+              <option value="gemini">Gemini Veo API (paid)</option>
+            </select>
+          </div>
+          <p id="geminiVideoAccessStatus" class="gemini-video-status">Checking whether this API key exposes Gemini Veo models...</p>
+          <div class="ai-gen-form">
+            <textarea id="geminiVeoPromptInput" class="form-input" rows="4" placeholder="Describe the exact subjects, action, setting, and visible format for this clip..."></textarea>
+            <button id="triggerGeminiVeoGenBtn" class="btn btn-primary">
+              <i class="fa-solid fa-wand-magic-sparkles"></i> Generate AI Video
+            </button>
+          </div>
+          <div class="free-generation-actions">
+            <a href="https://enter.pollinations.ai/keys" target="_blank" rel="noopener" class="btn btn-secondary btn-sm"><i class="fa-solid fa-key"></i> Get Free Pollinations Key</a>
+            <button id="importGoogleFlowVideoBtn" class="btn btn-secondary btn-sm"><i class="fa-solid fa-file-import"></i> Import Flow Video + Verify</button>
+            <input id="googleFlowVideoImportInput" type="file" accept="video/*" hidden>
+          </div>
+          <p id="geminiVeoJobStatus" class="gemini-video-status">Veo jobs can take a few minutes. Keep this dialog open while it checks the job.</p>
+          <div id="geminiVeoResultBox" class="ai-gen-result-preview hidden">
+            <h5>Gemini Veo Review:</h5>
+            <video id="geminiVeoGeneratedVideo" controls playsinline preload="metadata"></video>
+            <p id="geminiVeoVerificationText" class="gemini-video-verification"></p>
+            <button id="applyGeminiVeoAssetBtn" class="btn btn-accent btn-sm" disabled>
+              <i class="fa-solid fa-check"></i> Apply Gemini-Verified Clip
+            </button>
+          </div>
+        </div>
+
+        <!-- Custom Upload Section -->
+        <div id="modalUploadSection" class="upload-dropzone hidden">
+          <i class="fa-solid fa-cloud-arrow-up"></i>
+          <h4>Drag & Drop your video or photo here</h4>
+          <p>Supports MP4, WebM, MOV, PNG, JPG, WebP</p>
+          <input type="file" id="customFileInput" accept="video/*,image/*" class="file-input-hidden">
+          <button class="btn btn-secondary" onclick="document.getElementById('customFileInput').click()">Browse Files</button>
+        </div>
+
+        <!-- AI Prompt Generator Section -->
+        <div id="modalAiPromptSection" class="ai-prompt-box hidden">
+          <h4><i class="fa-solid fa-sparkles"></i> AI Visual Prompts for this Scene</h4>
+          <p>Optimized for Midjourney v6, Leonardo.ai, and Flux:</p>
+          <div class="prompt-card">
+            <code id="generatedAiPromptText">Cinematic 8k photorealistic shot --ar 16:9</code>
+            <button id="copyAiPromptBtn" class="btn btn-sm btn-secondary"><i class="fa-regular fa-copy"></i> Copy Prompt</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Google Flow Extension Queue Modal -->
+  <div id="flowQueueModal" class="modal-backdrop hidden">
+    <div class="modal-card flow-queue-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-list-check" style="color: #22d3ee;"></i>
+          <h3>Google Flow Sequential Prompt Queue</h3>
+        </div>
+        <button class="modal-close" id="closeFlowQueueBtn">&times;</button>
+      </div>
+
+      <div class="modal-body flow-queue-body">
+        <p class="settings-help">Prompts stay in scene order. Google Flow Automator accepts the CSV file below or copied multi-line prompts separated by <code>@@@NEXT@@@</code>.</p>
+
+        <div class="flow-queue-toolbar">
+          <div class="form-group">
+            <label for="flowQueueMediaType">Generation mode</label>
+            <select id="flowQueueMediaType" class="form-select">
+              <option value="video" selected>Video clips</option>
+              <option value="image">Still images</option>
+            </select>
+          </div>
+          <label class="flow-queue-check">
+            <input id="flowQueueOnlyUnresolved" type="checkbox" checked>
+            Only scenes without a Gemini-verified visual
+          </label>
+          <span id="flowQueueSummary" class="flow-queue-summary">0 prompts</span>
+        </div>
+
+        <div id="flowQueueEmpty" class="gemini-trace-empty hidden">Generate a project first, or include scenes that already have a verified visual.</div>
+        <div id="flowQueueList" class="flow-queue-list"></div>
+
+        <div class="flow-queue-actions">
+          <button id="bulkImportFlowMediaBtn" class="btn btn-primary"><i class="fa-solid fa-cloud-arrow-up"></i> Upload Approved Media + AI Sort</button>
+          <input id="bulkImportFlowMediaInput" type="file" accept="image/*,video/*" multiple hidden>
+          <button id="copyFlowQueueBtn" class="btn btn-primary"><i class="fa-regular fa-copy"></i> Copy Extension Queue</button>
+          <button id="downloadFlowQueueCsvBtn" class="btn btn-secondary"><i class="fa-solid fa-file-csv"></i> Download CSV</button>
+          <button id="downloadFlowQueueTxtBtn" class="btn btn-secondary"><i class="fa-solid fa-file-lines"></i> Download TXT</button>
+          <button id="downloadFlowQueueJsonBtn" class="btn btn-secondary"><i class="fa-solid fa-code"></i> Download JSON</button>
+          <button id="openGoogleFlowQueueBtn" class="btn btn-accent"><i class="fa-brands fa-google"></i> Open Google Flow</button>
+        </div>
+
+        <div id="flowBulkImportPanel" class="flow-bulk-import-panel hidden">
+          <div class="flow-bulk-import-head">
+            <strong id="flowBulkImportSummary">Waiting for your approved media...</strong>
+            <span id="flowBulkImportProgressText">0 / 0</span>
+          </div>
+          <progress id="flowBulkImportProgress" value="0" max="1"></progress>
+          <p class="settings-help">Upload approved images and videos in any order. Gemini reads the actual image pixels or sampled video frames, describes each file, then globally assigns the whole batch to the best matching script scenes. It does not reject or quality-review these uploads.</p>
+          <div id="flowBulkImportResults" class="flow-bulk-import-results"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Settings Modal -->
+  <div id="settingsModal" class="modal-backdrop hidden">
+    <div class="modal-card settings-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-sliders"></i>
+          <h3>VidRush Studio Settings & API Keys</h3>
+        </div>
+        <button class="modal-close" id="closeSettingsModalBtn">&times;</button>
+      </div>
+
+      <div class="modal-body settings-body">
+        <div class="settings-section">
+          <h4><i class="fa-solid fa-microphone-lines"></i> ElevenLabs Voiceover Engine</h4>
+          <div class="form-group">
+            <label for="elevenLabsApiKey">ElevenLabs API Key:</label>
+            <input type="password" id="elevenLabsApiKey" class="form-input" placeholder="xi-api-key (e.g. 29a8f...)">
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4><i class="fa-solid fa-brain"></i> AI Director & Copilot Engine</h4>
+          <div class="form-group">
+            <label for="aiProviderSelect">Active AI Engine:</label>
+            <select id="aiProviderSelect" class="form-select">
+              <option value="auto" selected>Auto (Built-in + Saved Keys)</option>
+              <option value="gemini">Google Gemini API (Gemini 1.5 Flash - Free Tier)</option>
+              <option value="openai">OpenAI ChatGPT (GPT-4o / GPT-4o-mini)</option>
+              <option value="ollama">Local Ollama LLM (Free Offline)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="geminiApiKey">Google Gemini API Key:</label>
+            <input type="password" id="geminiApiKey" class="form-input" placeholder="AIzaSy...">
+          </div>
+          <div class="form-group">
+            <label for="openaiApiKey">OpenAI API Key:</label>
+            <input type="password" id="openaiApiKey" class="form-input" placeholder="sk-...">
+          </div>
+          <div class="form-group">
+            <label for="ollamaUrl">Ollama Server Endpoint:</label>
+            <input type="text" id="ollamaUrl" class="form-input" value="http://localhost:11434">
+          </div>
+          <div class="form-group">
+            <label for="pollinationsApiKey">Pollinations API Key (free-account allowance):</label>
+            <input type="password" id="pollinationsApiKey" class="form-input" placeholder="pk_... or sk_...">
+            <p class="settings-help">Create a free key at enter.pollinations.ai. Use a key with no purchased balance if you require zero monetary spend.</p>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h4><i class="fa-solid fa-key"></i> Stock Media API Keys (Optional)</h4>
+          <div class="form-group">
+            <label for="pexelsApiKey">Pexels API Key:</label>
+            <input type="password" id="pexelsApiKey" class="form-input" placeholder="Enter Pexels API Key">
+          </div>
+          <div class="form-group">
+            <label for="pixabayApiKey">Pixabay API Key:</label>
+            <input type="password" id="pixabayApiKey" class="form-input" placeholder="Enter Pixabay API Key">
+          </div>
+        </div>
+
+        <div class="settings-actions">
+          <button id="saveSettingsBtn" class="btn btn-primary">Save All Settings</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. n8n Publishing Modal -->
+  <div id="n8nAutomationModal" class="modal-backdrop hidden">
+    <div class="modal-card google-flow-card">
+      <div class="modal-header">
+        <div class="modal-title">
+          <i class="fa-solid fa-diagram-project" style="color: #f97316;"></i>
+          <h3>n8n Publishing Bridge</h3>
+        </div>
+        <button class="modal-close" id="closeN8nAutomationBtn">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <p class="settings-help">This server-owned bridge sends only Gemini-verified renders to a configured n8n webhook. The browser never sends API keys or chooses a webhook URL.</p>
+        <div id="n8nAutomationConfigMessage" class="n8n-config-message"></div>
+        <div class="pipeline-actions-row">
+          <button id="refreshN8nConfigurationBtn" class="btn btn-secondary">
+            <i class="fa-solid fa-rotate"></i> Refresh Configuration
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Scripts in Structured Dependency Order -->
+  <script src="js/manifest.js?v=8.1"></script>
+  <script src="js/actions.js?v=8.5"></script>
+  <script src="js/history.js?v=8.0"></script>
+  <script src="js/voiceProvider.js?v=8.0"></script>
+  <script src="js/tts.js?v=8.0"></script>
+  <script src="js/stockApi.js?v=8.6"></script>
+  <script src="js/parser.js?v=8.0"></script>
+  <script src="js/aiAssistant.js?v=8.0"></script>
+  <script src="js/aiDirector.js?v=8.2"></script>
+  <script src="js/aiRushAgent.js?v=8.1"></script>
+  <script src="js/player.js?v=8.0"></script>
+  <script src="js/timeline.js?v=8.0"></script>
+  <script src="js/exporter.js?v=8.0"></script>
+  <script src="js/app.js?v=10.1"></script>
+</body>
+</html>
