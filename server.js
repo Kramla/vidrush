@@ -6,6 +6,9 @@ const { spawn } = require('node:child_process');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ffmpegPath = require('ffmpeg-static');
 const persistence = require('./persistence');
+const ProjectManifest = require('./js/manifest');
+const EditingEngine = require('./js/editingEngine');
+const { createDirectorService } = require('./directorService');
 
 const rootDirectory = __dirname;
 const rendersDirectory = path.join(rootDirectory, 'renders');
@@ -31,10 +34,12 @@ const supportedVeoModels = new Set([
   'veo-3.1-lite-generate-preview'
 ]);
 const generatedVideoJobs = new Map();
+const activeRenderRuns = new Map();
 const mediaPlacementCatalogs = new Map();
 const mediaPlacementCatalogTtlMs = 30 * 60 * 1000;
 const maxMediaPlacementCatalogs = 8;
 const geminiTraceContext = new AsyncLocalStorage();
+const renderExecutionContext = new AsyncLocalStorage();
 const geminiTraceSessions = new Map();
 const maxGeminiTraceSessions = 12;
 const maxGeminiTraceEntries = 180;
@@ -43,6 +48,13 @@ const maxGeminiTraceResponseChars = 32_000;
 const width = 1920;
 const height = 1080;
 const frameRate = 30;
+const directorService = createDirectorService({
+  persistence,
+  editingEngine: EditingEngine,
+  projectManifest: ProjectManifest,
+  modelTurn: callGeminiDirectorTurn,
+  startRenderJob
+});
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -453,21 +465,76 @@ function renderAutomationEligibility(payload) {
   };
 }
 
+function terminateChildTree(child) {
+  return new Promise((resolve) => {
+    if (!child?.pid) {
+      resolve();
+      return;
+    }
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      killer.once('error', () => {
+        try { child.kill('SIGKILL'); } catch {}
+        resolve();
+      });
+      killer.once('close', () => resolve());
+      return;
+    }
+    try { process.kill(-child.pid, 'SIGTERM'); } catch {
+      try { child.kill('SIGTERM'); } catch {}
+    }
+    setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {
+        try { child.kill('SIGKILL'); } catch {}
+      }
+      resolve();
+    }, 1200).unref?.();
+  });
+}
+
 function run(command, args, cwd = rootDirectory, options = {}) {
+  const inherited = renderExecutionContext.getStore() || {};
+  const execution = { ...inherited, ...options };
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: options.env || process.env
+      env: execution.env || process.env,
+      detached: process.platform !== 'win32'
     });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', reject);
+    let settled = false;
+    const maximumOutput = Math.max(2000, Number(execution.maxOutputChars) || 40_000);
+    const append = (stream, chunk) => {
+      const value = chunk.toString();
+      if (stream === 'stdout') stdout = (stdout + value).slice(-maximumOutput);
+      else stderr = (stderr + value).slice(-maximumOutput);
+      execution.onOutput?.({ stream, message: value.slice(0, 1200), pid: child.pid });
+    };
+    const onAbort = () => { terminateChildTree(child).catch(() => {}); };
+    execution.onSpawn?.(child);
+    if (execution.signal?.aborted) onAbort();
+    else execution.signal?.addEventListener('abort', onAbort, { once: true });
+    child.stdout.on('data', (chunk) => append('stdout', chunk));
+    child.stderr.on('data', (chunk) => append('stderr', chunk));
+    child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      execution.signal?.removeEventListener('abort', onAbort);
+      reject(error);
+    });
     child.on('close', (code) => {
-      if (code === 0) resolve({ stdout, stderr });
+      if (settled) return;
+      settled = true;
+      execution.signal?.removeEventListener('abort', onAbort);
+      execution.onClose?.(child, code);
+      if (execution.signal?.aborted) {
+        const error = new Error(`${path.basename(command)} was cancelled.`);
+        error.code = 'RENDER_CANCELLED';
+        reject(error);
+      } else if (code === 0 || (execution.acceptExitCodes || []).includes(code)) resolve({ stdout, stderr, code });
       else reject(new Error(`${path.basename(command)} exited with code ${code}: ${stderr.slice(-800)}`));
     });
   });
@@ -589,20 +656,10 @@ async function synthesizeElevenLabsNarration(script, outputPath, voice) {
 }
 
 async function getMediaDuration(filePath) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, ['-hide_banner', '-i', filePath], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', reject);
-    child.on('close', () => {
-      const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
-      if (!match) {
-        reject(new Error('Could not determine media duration with FFmpeg.'));
-        return;
-      }
-      resolve(Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]));
-    });
-  });
+  const { stderr } = await run(ffmpegPath, ['-hide_banner', '-i', filePath], rootDirectory, { acceptExitCodes: [1] });
+  const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!match) throw new Error('Could not determine media duration with FFmpeg.');
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
 function retimeScenes(scenes, audioDuration) {
@@ -853,7 +910,7 @@ async function materializeVideoUseSource(scene, assetPath, audioPath, audioStart
   await run(ffmpegPath, args);
 }
 
-async function runVideoUseRenderer(edlPath, outputPath, fps, captionsEnabled) {
+async function runVideoUseRenderer(edlPath, outputPath, fps, captionsEnabled, mode = 'final') {
   await Promise.all([fs.access(videoUseRendererPath), fs.access(videoUseBridgePath)]);
   const python = await resolveVideoUsePython();
   const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') || 'PATH';
@@ -863,6 +920,8 @@ async function runVideoUseRenderer(edlPath, outputPath, fps, captionsEnabled) {
   };
   const args = [videoUseBridgePath, edlPath, '-o', outputPath, '--fps', String(fps)];
   if (!captionsEnabled) args.push('--no-subtitles');
+  if (mode === 'draft') args.push('--draft');
+  else if (mode === 'preview' || mode === 'grade') args.push('--preview');
   return run(python, args, path.dirname(edlPath), { env });
 }
 
@@ -951,10 +1010,13 @@ async function reviewFinalRender(outputPath, scenes, captionStyle, apiKey) {
   }
 }
 
-async function renderProject(payload) {
+async function renderProject(payload, options = {}) {
+  const mode = ['preview', 'draft', 'grade', 'final'].includes(options.mode) ? options.mode : 'final';
+  const report = (stage, progress, message) => options.onProgress?.({ stage, progress, message });
+  report('validate', 3, 'Validating the authoritative project revision.');
   let automationEligibility = renderAutomationEligibility(payload);
   const projectData = validateProject(payload);
-  const renderId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
+  const renderId = options.renderId || `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomBytes(3).toString('hex')}`;
   const renderDirectory = path.join(rendersDirectory, renderId);
   const assetsDirectory = path.join(renderDirectory, 'assets');
   await fs.mkdir(assetsDirectory, { recursive: true });
@@ -965,6 +1027,7 @@ async function renderProject(payload) {
   const narrationScript = narration.text;
   let narrationAlignment = null;
   let timingSource = 'proportional-audio-duration';
+  report('narration', 8, 'Synthesizing narration for deterministic timing.');
 
   if (projectData.voice.provider === 'elevenlabs') {
     try {
@@ -982,6 +1045,7 @@ async function renderProject(payload) {
   }
 
   const narrationDuration = await getMediaDuration(narrationPath);
+  report('alignment', 24, 'Aligning scene boundaries to narration audio.');
   const scenes = narrationAlignment
     ? retimeScenesFromAlignment(projectData.scenes, narrationAlignment, narrationDuration)
     : retimeScenes(projectData.scenes, narrationDuration);
@@ -1011,6 +1075,7 @@ async function renderProject(payload) {
     ]);
     finalAudioPath = mixedAudioPath;
   }
+  report('audio-ready', 34, 'Narration, captions, and music are ready.');
 
   const sourceDirectory = path.join(renderDirectory, 'video-use-sources');
   await fs.mkdir(sourceDirectory, { recursive: true });
@@ -1049,13 +1114,14 @@ async function renderProject(payload) {
       reason: `Gemini-directed visual beat ${scene.index}`
     });
     audioOffset += scene.duration;
+    report('materialize-scenes', 34 + Math.round(scene.index / scenes.length * 31), `Prepared scene ${scene.index} of ${scenes.length}.`);
   }
 
   const edl = {
     version: 1,
     sources,
     ranges,
-    grade: 'none',
+    grade: 'auto',
     overlays: [],
     subtitles: projectData.captionStyle.enabled ? captionsPath : undefined,
     subtitle_style: projectData.captionStyle,
@@ -1075,12 +1141,18 @@ async function renderProject(payload) {
   const edlPath = path.join(renderDirectory, 'edl.json');
   await fs.writeFile(edlPath, JSON.stringify(edl, null, 2), 'utf8');
   await writeVideoUseProjectMemory(renderDirectory, projectData, scenes);
+  report('edl-ready', 70, `video-use EDL created with automatic grading for ${mode} mode.`);
 
-  const outputPath = path.join(renderDirectory, 'vidrush-render.mp4');
-  await runVideoUseRenderer(edlPath, outputPath, projectData.settings.fps, projectData.captionStyle.enabled);
+  const outputFile = mode === 'preview' ? 'preview.mp4' : mode === 'draft' ? 'draft.mp4' : mode === 'grade' ? 'graded-preview.mp4' : 'vidrush-render.mp4';
+  const outputPath = path.join(renderDirectory, outputFile);
+  report('video-use-render', 74, `Running video-use ${mode} mode.`);
+  await runVideoUseRenderer(edlPath, outputPath, projectData.settings.fps, projectData.captionStyle.enabled, mode);
   const renderedDuration = await getMediaDuration(outputPath).catch(() => narrationDuration);
 
-  const qualityReview = await reviewFinalRender(outputPath, scenes, projectData.captionStyle, payload.geminiApiKey);
+  report('grade-complete', 90, 'video-use completed automatic per-segment grading.');
+  const qualityReview = mode === 'final'
+    ? await reviewFinalRender(outputPath, scenes, projectData.captionStyle)
+    : { status: 'skipped', pass: null, score: null, summary: `${mode} output omits final Gemini QA.`, issues: [] };
   if (qualityReview.pass === false) {
     automationEligibility = {
       ...automationEligibility,
@@ -1094,6 +1166,8 @@ async function renderProject(payload) {
     createdAt: new Date().toISOString(),
     renderer: 'browser-use/video-use',
     rendererVersion: '0.1.0',
+    mode,
+    grade: 'auto',
     edlFile: path.basename(edlPath),
     project: projectData.project,
     narrationDuration: Number(narrationDuration.toFixed(2)),
@@ -1105,33 +1179,36 @@ async function renderProject(payload) {
     timingSource,
     wordTimings,
     qualityReview,
-    outputFile: path.basename(outputPath),
+    outputFile,
     automationEligibility
   };
 
   await fs.writeFile(path.join(renderDirectory, 'render-manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
-  const automation = await initializeRenderAutomationRecord({
-    renderId,
-    title: projectData.project.title,
-    durationSeconds: Number(renderedDuration.toFixed(1)),
-    scenesCount: scenes.length,
-    aspectRatio: projectData.project.aspectRatio,
-    downloadUrl: `/renders/${renderId}/vidrush-render.mp4`,
-    manifestUrl: `/renders/${renderId}/render-manifest.json`,
-    eligibility: automationEligibility
-  });
+  const automation = mode === 'final' ? await initializeRenderAutomationRecord({
+      renderId,
+      title: projectData.project.title,
+      durationSeconds: Number(renderedDuration.toFixed(1)),
+      scenesCount: scenes.length,
+      aspectRatio: projectData.project.aspectRatio,
+      downloadUrl: `/renders/${renderId}/${outputFile}`,
+      manifestUrl: `/renders/${renderId}/render-manifest.json`,
+      eligibility: automationEligibility
+    }) : null;
+  report('complete', 100, `${mode} render completed.`);
 
   return {
     renderId,
+    mode,
+    grade: 'auto',
     title: projectData.project.title,
     durationSeconds: Number(renderedDuration.toFixed(1)),
-    downloadUrl: `/renders/${renderId}/vidrush-render.mp4`,
+    downloadUrl: `/renders/${renderId}/${outputFile}`,
     manifestUrl: `/renders/${renderId}/render-manifest.json`,
     scenesCount: scenes.length,
     timingSource,
     qualityReview,
-    automation: publicAutomationRecord(automation)
+    automation: automation ? publicAutomationRecord(automation) : null
   };
 }
 
@@ -1229,8 +1306,8 @@ for (const fileName of ['.env', '.env.local', '.env.providers.local', '.env.n8n.
   } catch {}
 }
 
-function getActiveGeminiKey(clientKey) {
-  return cleanApiKey(process.env.GEMINI_API_KEY) || cleanApiKey(defaultEnv.GEMINI_API_KEY) || cleanApiKey(clientKey) || '';
+function getActiveGeminiKey() {
+  return cleanApiKey(process.env.GEMINI_API_KEY) || cleanApiKey(defaultEnv.GEMINI_API_KEY) || '';
 }
 
 function getActivePollinationsKey(clientKey) {
@@ -1709,6 +1786,96 @@ async function callGeminiParts(apiKey, parts, expectJson = false) {
 async function callGeminiAPI(apiKey, systemPrompt, userPrompt, expectJson = false) {
   const text = `${systemPrompt ? systemPrompt + '\n\n' : ''}${userPrompt}`;
   return callGeminiParts(apiKey, [{ text }], expectJson);
+}
+
+function directorTraceParts(systemInstruction, contents, tools) {
+  const toolNames = (tools || []).flatMap((tool) => tool.functionDeclarations || []).map((tool) => tool.name);
+  return [{ text: `SYSTEM INSTRUCTION\n${systemInstruction}` }, {
+    text: `AVAILABLE BOUNDED TOOLS\n${toolNames.join(', ')}\n\nCONVERSATION STATE\n${JSON.stringify(contents)}`
+  }];
+}
+
+function directorTraceResponse(content) {
+  return JSON.stringify({
+    role: content?.role || 'model',
+    parts: (content?.parts || []).map((part) => {
+      if (part.functionCall) return { functionCall: part.functionCall };
+      if (typeof part.text === 'string') return { text: part.text };
+      if (part.thoughtSignature) return { thoughtSignature: '[OPAQUE SIGNATURE PRESERVED, OMITTED FROM TRACE]' };
+      return { type: 'non-text model part' };
+    })
+  });
+}
+
+async function callGeminiDirectorTurn(options = {}) {
+  return runWithGeminiTrace(
+    { geminiTraceSessionId: options.traceSessionId },
+    options.operation || 'Gemini director tool turn',
+    async () => {
+      const key = getActiveGeminiKey(options.apiKey);
+      if (!key) throw new Error('A Google Gemini API key is required.');
+      const candidateModels = await getGeminiCandidateModels(key);
+      let lastError = null;
+
+      for (const model of candidateModels) {
+        if (options.signal?.aborted) throw new Error('Gemini director request was cancelled.');
+        const traceEntry = startGeminiTraceEntry({
+          model: `${model} + bounded director tools`,
+          expectJson: false,
+          parts: directorTraceParts(options.systemInstruction, options.contents, options.tools)
+        });
+        try {
+          const timeoutSignal = AbortSignal.timeout(90_000);
+          const signal = options.signal && typeof AbortSignal.any === 'function'
+            ? AbortSignal.any([options.signal, timeoutSignal])
+            : (options.signal || timeoutSignal);
+          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              systemInstruction: { parts: [{ text: options.systemInstruction }] },
+              contents: options.contents,
+              tools: options.tools,
+              toolConfig: { functionCallingConfig: { mode: 'AUTO' } },
+              generationConfig: { temperature: 0.2, maxOutputTokens: 4096 }
+            }),
+            signal
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            lastError = new Error(payload?.error?.message || `Gemini director returned HTTP ${response.status}.`);
+            finishGeminiTraceEntry(traceEntry, 'failed', JSON.stringify(payload), lastError.message);
+            continue;
+          }
+          const content = payload.candidates?.[0]?.content;
+          if (!content || !Array.isArray(content.parts) || content.parts.length === 0) {
+            lastError = new Error('Gemini director returned no content.');
+            finishGeminiTraceEntry(traceEntry, 'failed', JSON.stringify(payload), lastError.message);
+            continue;
+          }
+          if (!content.role) content.role = 'model';
+          const functionCalls = content.parts.filter((part) => part.functionCall).map((part) => part.functionCall);
+          const text = content.parts.map((part) => part.text || '').filter(Boolean).join('\n').trim();
+          finishGeminiTraceEntry(traceEntry, 'completed', directorTraceResponse(content));
+          return {
+            model,
+            content,
+            functionCalls,
+            text,
+            usageMetadata: payload.usageMetadata || {}
+          };
+        } catch (error) {
+          if (options.signal?.aborted) {
+            finishGeminiTraceEntry(traceEntry, 'failed', '', 'Gemini director request was cancelled.');
+            throw error;
+          }
+          lastError = error;
+          finishGeminiTraceEntry(traceEntry, 'failed', '', error.message);
+        }
+      }
+      throw lastError || new Error('Failed to communicate with the Gemini director.');
+    }
+  );
 }
 
 function generatedImageExtension(mimeType) {
@@ -4358,6 +4525,210 @@ function visualBeatQualityIssues(beats) {
   return issues.slice(0, 12);
 }
 
+function renderPayloadFromManifest(manifest, options = {}) {
+  const voice = {
+    ...(manifest.audio?.voice || {}),
+    ...(options.voice && typeof options.voice === 'object' ? options.voice : {})
+  };
+  if (options.forceLocalVoice === true) {
+    voice.provider = 'windows-sapi';
+    delete voice.apiKey;
+  }
+  return {
+    project: {
+      id: manifest.id,
+      title: manifest.metadata?.title || 'VidRush Video',
+      format: manifest.metadata?.format || 'documentary',
+      theme: manifest.metadata?.theme || 'cinematic-documentary',
+      aspectRatio: manifest.metadata?.aspectRatio || '16:9',
+      sourcePolicy: manifest.metadata?.sourcePolicy
+    },
+    settings: { fps: manifest.settings?.fps || 30 },
+    captionStyle: {
+      preset: manifest.captions?.style || 'hormozi',
+      position: manifest.captions?.position || 'bottom',
+      size: manifest.captions?.fontSize || 44,
+      enabled: manifest.captions?.enabled !== false
+    },
+    backgroundMusic: {
+      enabled: manifest.audio?.backgroundMusic?.enabled !== false,
+      track: manifest.audio?.backgroundMusic?.trackId || 'ambient-cinematic',
+      volume: manifest.audio?.backgroundMusic?.volume ?? 0.15
+    },
+    voice,
+    scenes: (manifest.scenes || []).map((scene) => ({
+      id: scene.id,
+      text: scene.text,
+      caption: scene.captionText || scene.text,
+      duration: scene.durationSec,
+      shotType: scene.shotDirection?.shotType,
+      editing: {
+        motion: scene.editing?.motion || 'auto',
+        sourceStartSec: scene.editing?.sourceStartSec || 0
+      },
+      selectedMedia: scene.visual
+    }))
+  };
+}
+
+function isProcessAlive(processId) {
+  if (!Number.isInteger(Number(processId)) || Number(processId) <= 0) return false;
+  try {
+    process.kill(Number(processId), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function terminateProcessId(processId) {
+  if (!isProcessAlive(processId)) return;
+  if (process.platform === 'win32') {
+    await new Promise((resolve) => {
+      const killer = spawn('taskkill.exe', ['/pid', String(processId), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      killer.once('error', resolve);
+      killer.once('close', resolve);
+    });
+    return;
+  }
+  try { process.kill(-Number(processId), 'SIGKILL'); } catch {
+    try { process.kill(Number(processId), 'SIGKILL'); } catch {}
+  }
+}
+
+async function startRenderJob(requestData = {}, options = {}) {
+  const type = ['preview', 'draft', 'grade', 'final'].includes(requestData.type) ? requestData.type : null;
+  if (!type) throw Object.assign(new Error('Render type must be preview, draft, grade, or final.'), { code: 'INVALID_RENDER_JOB_TYPE', statusCode: 400 });
+  let manifest = requestData.manifest ? JSON.parse(JSON.stringify(requestData.manifest)) : null;
+  if (!manifest) {
+    const project = persistence.loadProject(requestData.projectId);
+    if (!project?.manifest) throw Object.assign(new Error('Project not found.'), { code: 'PROJECT_NOT_FOUND', statusCode: 404 });
+    manifest = project.manifest;
+    if (requestData.projectRevision !== undefined && Number(requestData.projectRevision) !== Number(project.revision)) {
+      throw Object.assign(new Error('The requested render revision is stale.'), { code: 'STALE_RENDER_REVISION', statusCode: 409 });
+    }
+  }
+  const issues = ProjectManifest.validate(manifest);
+  if (issues.length > 0) throw Object.assign(new Error(issues[0].message), { code: issues[0].code || 'INVALID_MANIFEST', statusCode: 400 });
+  if (!manifest.scenes.length) throw Object.assign(new Error('At least one scene is required to render.'), { code: 'EMPTY_PROJECT', statusCode: 400 });
+  const jobId = requestData.id || `renderjob_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  persistence.createRenderJob({
+    id: jobId,
+    projectId: manifest.id,
+    projectRevision: manifest.metadata.revision,
+    type,
+    message: `${type} render queued.`,
+    input: {
+      source: cleanText(requestData.source || 'editor', 80),
+      label: cleanText(requestData.label || `${type} render`, 180),
+      manifestFingerprint: EditingEngine.manifestFingerprint(manifest),
+      manifest
+    }
+  });
+  const controller = new AbortController();
+  const active = { controller, child: null, task: null };
+  const renderPayload = renderPayloadFromManifest(manifest, {
+    voice: requestData.voice,
+    forceLocalVoice: requestData.forceLocalVoice === true
+  });
+  const task = Promise.resolve().then(() => renderExecutionContext.run({
+    signal: controller.signal,
+    onSpawn(child) {
+      active.child = child;
+      persistence.updateRenderJob(jobId, { processId: child.pid, log: { stream: 'system', message: `Started ${path.basename(child.spawnfile || 'process')} process ${child.pid}.` } });
+    },
+    onClose(child, code) {
+      if (active.child === child) active.child = null;
+      persistence.updateRenderJob(jobId, { processId: null, log: { stream: 'system', message: `Process ${child.pid} exited with code ${code}.` } });
+    },
+    onOutput(entry) {
+      const message = cleanText(entry.message, 1200);
+      if (message) persistence.updateRenderJob(jobId, { log: { stream: entry.stream, message } });
+    }
+  }, async () => {
+    persistence.updateRenderJob(jobId, { status: 'running', stage: 'starting', progress: 1, message: `Starting video-use ${type} render.` });
+    try {
+      const result = await renderProject(renderPayload, {
+        mode: type,
+        renderId: jobId,
+        onProgress(progress) {
+          persistence.updateRenderJob(jobId, {
+            status: 'running',
+            stage: progress.stage,
+            progress: progress.progress,
+            message: progress.message
+          });
+        }
+      });
+      if (controller.signal.aborted) throw Object.assign(new Error('Render cancelled.'), { code: 'RENDER_CANCELLED' });
+      if (type === 'final') {
+        const automation = await queueAutomaticN8nPublishing(result.renderId);
+        result.automation = publicAutomationRecord(automation);
+      }
+      persistence.updateRenderJob(jobId, {
+        status: 'completed',
+        stage: 'completed',
+        progress: 100,
+        processId: null,
+        message: `${type} render completed.`,
+        result,
+        log: { stream: 'system', message: `${type} output ready at ${result.downloadUrl}.` }
+      });
+    } catch (error) {
+      if (controller.signal.aborted || error.code === 'RENDER_CANCELLED') {
+        persistence.updateRenderJob(jobId, { status: 'cancelled', stage: 'cancelled', progress: 100, processId: null, message: `${type} render cancelled.`, error: '' });
+      } else {
+        persistence.updateRenderJob(jobId, { status: 'failed', stage: 'failed', progress: 100, processId: null, message: `${type} render failed.`, error: cleanText(error.message, 1800), log: { stream: 'system', message: `Failure: ${cleanText(error.message, 1000)}` } });
+      }
+    }
+  })).finally(() => activeRenderRuns.delete(jobId));
+  active.task = task;
+  activeRenderRuns.set(jobId, active);
+  if (options.background === false) await task;
+  else task.catch(() => {});
+  return persistence.getRenderJob(jobId, true);
+}
+
+async function cancelRenderJob(jobId) {
+  const job = persistence.getRenderJob(jobId, true);
+  if (!job) throw Object.assign(new Error('Render job not found.'), { code: 'RENDER_JOB_NOT_FOUND', statusCode: 404 });
+  if (['completed', 'failed', 'cancelled'].includes(job.status)) return job;
+  const active = activeRenderRuns.get(jobId);
+  if (!active) {
+    if (job.processId) await terminateProcessId(job.processId);
+    return persistence.updateRenderJob(jobId, { status: 'cancelled', stage: 'cancelled', progress: 100, processId: null, message: 'Interrupted render cancelled and its process tree terminated.' });
+  }
+  persistence.updateRenderJob(jobId, { stage: 'cancelling', message: 'Terminating the active Python/FFmpeg process tree.' });
+  active.controller.abort();
+  if (active.child) await terminateChildTree(active.child);
+  await Promise.race([active.task.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 12_000))]);
+  const current = persistence.getRenderJob(jobId, true);
+  if (!['completed', 'failed', 'cancelled'].includes(current.status)) {
+    return persistence.updateRenderJob(jobId, { status: 'cancelled', stage: 'cancelled', progress: 100, processId: null, message: 'Render cancelled and its process tree terminated.' });
+  }
+  return current;
+}
+
+async function recoverInterruptedRenderJobs() {
+  const interrupted = persistence.listInterruptedRenderJobs();
+  for (const job of interrupted) {
+    const wasAlive = isProcessAlive(job.processId);
+    if (wasAlive) await terminateProcessId(job.processId);
+    persistence.updateRenderJob(job.id, {
+      status: 'failed',
+      stage: 'interrupted',
+      progress: 100,
+      processId: null,
+      message: wasAlive
+        ? 'Server restarted; the orphaned render process tree was terminated.'
+        : 'Server restarted before this render job completed.',
+      error: 'Interrupted by server restart.',
+      log: { stream: 'system', message: wasAlive ? 'Restart recovery terminated the recorded process tree.' : 'Restart recovery found no live recorded process.' }
+    });
+  }
+  return interrupted.length;
+}
+
 function createServer() {
   return http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, `http://${request.headers.host || '127.0.0.1'}`);
@@ -4383,7 +4754,7 @@ function createServer() {
 
     if (request.method === 'GET' && requestUrl.pathname === '/api/projects') {
       const projects = persistence.listProjects(requestUrl.searchParams.get('limit'));
-      const latest = requestUrl.searchParams.get('latest') === '1' ? persistence.latestProject() : null;
+      const latest = requestUrl.searchParams.get('latest') === '1' ? persistence.latestValidProject(ProjectManifest) : null;
       sendJson(response, 200, { ok: true, projects, latest });
       return;
     }
@@ -4391,13 +4762,29 @@ function createServer() {
     if (request.method === 'POST' && requestUrl.pathname === '/api/projects') {
       try {
         const body = await readJsonBody(request);
-        const saved = persistence.saveProject(body.manifest, {
-          label: cleanText(body.label || 'Autosave', 180),
-          createVersion: body.createVersion !== false
-        });
+        if (body.manifest !== undefined) throw Object.assign(new Error('Direct manifest persistence is forbidden. Create a project, then submit editing-engine transactions.'), { code: 'DIRECT_MANIFEST_FORBIDDEN' });
+        const saved = persistence.createProject(body.project || {}, { projectManifest: ProjectManifest });
         sendJson(response, 201, { ok: true, ...saved });
       } catch (error) {
-        sendJson(response, 400, { ok: false, error: error.message || 'Unable to save project.' });
+        sendJson(response, error.statusCode || 400, { ok: false, code: error.code || 'PROJECT_CREATE_FAILED', error: error.message || 'Unable to create project.' });
+      }
+      return;
+    }
+
+    const projectTransactionMatch = requestUrl.pathname.match(/^\/api\/projects\/([A-Za-z0-9._-]{4,160})\/transactions$/);
+    if (request.method === 'POST' && projectTransactionMatch) {
+      try {
+        const body = await readJsonBody(request);
+        const saved = persistence.applyProjectTransaction(projectTransactionMatch[1], body.transaction, {
+          editingEngine: EditingEngine,
+          projectManifest: ProjectManifest
+        }, {
+          label: cleanText(body.label || 'Editor transaction', 180),
+          createVersion: body.createVersion !== false
+        });
+        sendJson(response, 200, { ok: true, ...saved });
+      } catch (error) {
+        sendJson(response, error.statusCode || 400, { ok: false, code: error.code || 'PROJECT_TRANSACTION_FAILED', error: error.message || 'Unable to commit project transaction.' });
       }
       return;
     }
@@ -4424,7 +4811,9 @@ function createServer() {
     if (request.method === 'POST' && projectRestoreMatch) {
       try {
         const body = await readJsonBody(request);
-        const restored = persistence.restoreProjectVersion(projectRestoreMatch[1], body.versionId);
+        const restored = body.fingerprint
+          ? persistence.restoreProjectFingerprint(projectRestoreMatch[1], body.fingerprint, { editingEngine: EditingEngine, projectManifest: ProjectManifest })
+          : persistence.restoreProjectVersion(projectRestoreMatch[1], body.versionId, { editingEngine: EditingEngine, projectManifest: ProjectManifest });
         if (!restored) throw new Error('Project version not found.');
         sendJson(response, 200, { ok: true, ...restored });
       } catch (error) {
@@ -4506,6 +4895,97 @@ function createServer() {
       sendJson(response, job ? 200 : 404, job
         ? { ok: true, job }
         : { ok: false, error: 'Generation job not found.' });
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/director/jobs') {
+      sendJson(response, 200, { ok: true, jobs: directorService.listJobs(requestUrl.searchParams.get('limit')) });
+      return;
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/director/jobs') {
+      try {
+        const body = await readJsonBody(request);
+        body.geminiTraceSessionId = body.geminiTraceSessionId || request.headers['x-gemini-trace-session'] || '';
+        activateGeminiTrace(body, 'Gemini tool-using creative director');
+        const job = await directorService.startJob(body);
+        sendJson(response, 202, { ok: true, job });
+      } catch (error) {
+        sendJson(response, error.statusCode || 400, { ok: false, code: error.code || 'DIRECTOR_START_FAILED', error: error.message || 'Unable to start the Gemini director.' });
+      }
+      return;
+    }
+
+    const directorJobMatch = requestUrl.pathname.match(/^\/api\/director\/jobs\/([A-Za-z0-9._-]{4,180})$/);
+    if (request.method === 'GET' && directorJobMatch) {
+      const job = directorService.getJob(directorJobMatch[1]);
+      sendJson(response, job ? 200 : 404, job ? { ok: true, job } : { ok: false, error: 'Director job not found.' });
+      return;
+    }
+
+    const directorActionMatch = requestUrl.pathname.match(/^\/api\/director\/jobs\/([A-Za-z0-9._-]{4,180})\/(approve|reject|cancel|rebase)$/);
+    if (request.method === 'POST' && directorActionMatch) {
+      try {
+        const body = await readJsonBody(request);
+        body.geminiTraceSessionId = body.geminiTraceSessionId || request.headers['x-gemini-trace-session'] || '';
+        const [, jobId, action] = directorActionMatch;
+        if (action === 'approve') {
+          const result = directorService.approveJob(jobId);
+          sendJson(response, 200, { ok: true, ...result });
+        } else if (action === 'reject') {
+          sendJson(response, 200, { ok: true, job: directorService.rejectJob(jobId) });
+        } else if (action === 'cancel') {
+          sendJson(response, 200, { ok: true, job: directorService.cancelJob(jobId) });
+        } else {
+          activateGeminiTrace(body, 'Gemini director proposal rebase');
+          const job = await directorService.rebaseJob(jobId, body);
+          sendJson(response, 202, { ok: true, job });
+        }
+      } catch (error) {
+        sendJson(response, error.statusCode || 400, { ok: false, code: error.code || 'DIRECTOR_ACTION_FAILED', error: error.message || 'Unable to update the director job.' });
+      }
+      return;
+    }
+
+    if (request.method === 'GET' && requestUrl.pathname === '/api/render/jobs') {
+      sendJson(response, 200, { ok: true, jobs: persistence.listRenderJobs(requestUrl.searchParams.get('limit')) });
+      return;
+    }
+
+    if (request.method === 'POST' && requestUrl.pathname === '/api/render/jobs') {
+      try {
+        const body = await readJsonBody(request);
+        if (body.manifest !== undefined) throw Object.assign(new Error('Render jobs must reference a persisted project revision.'), { code: 'DIRECT_RENDER_MANIFEST_FORBIDDEN', statusCode: 400 });
+        const job = await startRenderJob({
+          type: body.type,
+          projectId: body.projectId,
+          projectRevision: body.projectRevision,
+          source: 'editor',
+          label: body.label,
+          voice: body.voice
+        });
+        sendJson(response, 202, { ok: true, job });
+      } catch (error) {
+        sendJson(response, error.statusCode || 400, { ok: false, code: error.code || 'RENDER_JOB_START_FAILED', error: error.message || 'Unable to start render job.' });
+      }
+      return;
+    }
+
+    const renderJobMatch = requestUrl.pathname.match(/^\/api\/render\/jobs\/([A-Za-z0-9._-]{4,160})$/);
+    if (request.method === 'GET' && renderJobMatch) {
+      const job = persistence.getRenderJob(renderJobMatch[1], true);
+      sendJson(response, job ? 200 : 404, job ? { ok: true, job } : { ok: false, error: 'Render job not found.' });
+      return;
+    }
+
+    const renderCancelMatch = requestUrl.pathname.match(/^\/api\/render\/jobs\/([A-Za-z0-9._-]{4,160})\/cancel$/);
+    if (request.method === 'POST' && renderCancelMatch) {
+      try {
+        const job = await cancelRenderJob(renderCancelMatch[1]);
+        sendJson(response, 200, { ok: true, job });
+      } catch (error) {
+        sendJson(response, error.statusCode || 400, { ok: false, code: error.code || 'RENDER_CANCEL_FAILED', error: error.message || 'Unable to cancel render job.' });
+      }
       return;
     }
 
@@ -5102,7 +5582,7 @@ function createServer() {
       return;
     }
 
-    if (request.method === 'POST' && requestUrl.pathname === '/api/gemini/copilot') {
+    if (request.method === 'POST' && requestUrl.pathname === '/api/gemini/copilot-legacy') {
       try {
         const body = await readJsonBody(request);
         activateGeminiTrace(body, 'Gemini editor copilot');
@@ -5257,7 +5737,7 @@ Prefer the smallest set of edits that fulfills the request. Return at most 100 a
         ok: true,
         app: 'VidRush Studio',
         renderer: 'browser-use/video-use',
-        features: ['preflight', 'durable-projects', 'generation-jobs', 'media-search-cache', 'multimodal-embeddings', 'video-use-edl', 'video-use-render', 'elevenlabs-alignment', 'final-render-qa', 'ducking', 'subtitles-last', 'loudness-normalization', 'gemini-veo', 'n8n-publishing'],
+        features: ['preflight', 'durable-projects', 'generation-jobs', 'persistent-director-jobs', 'bounded-gemini-tools', 'staged-edit-approval', 'media-search-cache', 'multimodal-embeddings', 'video-use-edl', 'video-use-render', 'elevenlabs-alignment', 'final-render-qa', 'ducking', 'subtitles-last', 'loudness-normalization', 'gemini-veo', 'n8n-publishing'],
         n8nPublishingConfigured: getN8nAutomationConfig().configured,
         localOnly: true
       });
@@ -5304,10 +5784,11 @@ Prefer the smallest set of edits that fulfills the request. Return at most 100 a
 
     if (request.method === 'POST' && requestUrl.pathname === '/api/render') {
       try {
-        const renderResult = await renderProject(await readJsonBody(request));
-        const automation = await queueAutomaticN8nPublishing(renderResult.renderId);
-        renderResult.automation = publicAutomationRecord(automation);
-        sendJson(response, 201, { ok: true, render: renderResult });
+        const body = await readJsonBody(request);
+        if (!body.project?.id) throw new Error('A persisted project id is required.');
+        const job = await startRenderJob({ type: 'final', projectId: body.project.id, projectRevision: body.projectRevision, voice: body.voice, source: 'legacy-render-route' }, { background: false });
+        if (job.status !== 'completed') throw new Error(job.error || 'Final render job failed.');
+        sendJson(response, 201, { ok: true, render: job.result, job });
       } catch (error) {
         console.error('Render error:', error);
         sendJson(response, 400, { ok: false, error: error.message || 'Local render failed.' });
@@ -5330,7 +5811,10 @@ if (require.main === module) {
     fs.mkdir(rendersDirectory, { recursive: true }),
     fs.mkdir(generatedAssetsDirectory, { recursive: true })
   ])
-    .then(() => createServer().listen(port, '127.0.0.1', () => console.log(`VidRush Studio is running at http://127.0.0.1:${port}`)))
+    .then(async () => {
+      await recoverInterruptedRenderJobs();
+      createServer().listen(port, '127.0.0.1', () => console.log(`VidRush Studio is running at http://127.0.0.1:${port}`));
+    })
     .catch((error) => { console.error('Unable to start VidRush Studio.', error); process.exitCode = 1; });
 }
 
@@ -5343,6 +5827,7 @@ module.exports = {
   copyAndExtractOriginalMediaFrames,
   computePreflightQuote,
   createServer,
+  cancelRenderJob,
   enrichMediaSearchQueries,
   getN8nAutomationConfig,
   geminiEligibilityQuestion,
@@ -5353,9 +5838,11 @@ module.exports = {
   recordN8nPublishingCallback,
   renderAutomationEligibility,
   renderProject,
+  recoverInterruptedRenderJobs,
   retimeScenes,
   scriptSegmentationQualityIssues,
   signatureMatches,
   selectVisionCandidates,
+  startRenderJob,
   validateProject
 };

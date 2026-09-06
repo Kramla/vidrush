@@ -36,7 +36,8 @@ document.addEventListener('DOMContentLoaded', () => {
     isProcessing: false,
     serverCapabilities: { hasGemini: false, hasPollinations: false, hasPexels: false, geminiGeneration: null },
     geminiTraceSessionId: '',
-    timelineProposalSerial: 0
+    timelineProposalSerial: 0,
+    activeDirectorJobId: ''
   };
 
   const nativeFetch = window.fetch.bind(window);
@@ -145,6 +146,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const chatFeed = document.getElementById('chatFeed');
   const chatInputArea = document.getElementById('chatInputArea');
   const sendChatBtn = document.getElementById('sendChatBtn');
+  const cancelDirectorBtn = document.getElementById('cancelDirectorBtn');
   const activeProjectTitle = document.getElementById('activeProjectTitle');
   const playerCurrentSceneBadge = document.getElementById('playerCurrentSceneBadge');
   const activeThemeBadge = document.getElementById('activeThemeBadge');
@@ -276,7 +278,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const saveSettingsBtn = document.getElementById('saveSettingsBtn');
   const elevenLabsApiKeyInput = document.getElementById('elevenLabsApiKey');
   const aiProviderSelect = document.getElementById('aiProviderSelect');
-  const geminiApiKeyInput = document.getElementById('geminiApiKey');
   const openaiApiKeyInput = document.getElementById('openaiApiKey');
   const ollamaUrlInput = document.getElementById('ollamaUrl');
   const pexelsApiKeyInput = document.getElementById('pexelsApiKey');
@@ -394,8 +395,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const restoredManifest = await ProjectStore.restoreLatest();
     if (restoredManifest) {
-      ProjectStore.init(restoredManifest);
+      ProjectStore.init(restoredManifest, { persisted: true });
       showToast(`Restored "${restoredManifest.metadata?.title || 'your latest project'}".`, 'success');
+    } else {
+      await ProjectStore.createCurrentProject();
     }
 
     setupEventListeners();
@@ -484,7 +487,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function renderGeminiGenerationCapabilities() {
     const capabilities = uiState.serverCapabilities.geminiGeneration;
-    const configured = uiState.serverCapabilities.hasGemini || !!AIAssistant.getGeminiKey();
+    const configured = uiState.serverCapabilities.hasGemini;
     const renderStatus = (element, capability, label) => {
       if (!element) return;
       if (!configured) {
@@ -542,7 +545,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const response = await fetch('/api/gemini/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: AIAssistant.getGeminiKey() })
+        body: '{}'
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.valid) throw new Error(payload.error || 'Gemini model discovery failed.');
@@ -736,6 +739,17 @@ document.addEventListener('DOMContentLoaded', () => {
     closeGeminiTraceFooterBtn.addEventListener('click', closeGeminiTraceModal);
     refreshGeminiTraceBtn.addEventListener('click', loadGeminiTrace);
     sendChatBtn.addEventListener('click', handleChatSubmit);
+    cancelDirectorBtn.addEventListener('click', async () => {
+      const jobId = uiState.activeDirectorJobId || AIRushAgent.getActiveJobId();
+      if (!jobId) return;
+      cancelDirectorBtn.disabled = true;
+      try {
+        await AIRushAgent.cancelJob(jobId);
+        showToast('Gemini director job cancelled.', 'warning');
+      } catch (error) {
+        showToast(`Unable to cancel director job: ${error.message}`, 'error');
+      }
+    });
     chatInputArea.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
@@ -1104,22 +1118,21 @@ document.addEventListener('DOMContentLoaded', () => {
       setPipelineStep(5, 'Assembling multi-track video timeline...');
       await delay(400);
 
-      ProjectStore.dispatch({
-        type: 'LOAD_PROJECT',
-        manifest: generatedManifest
-      }, `Generated project "${generatedManifest.metadata.title}"`);
-      await ProjectStore.saveNow('Generation completed');
+      const committedManifest = await ProjectStore.replaceWithGeneratedProject(
+        generatedManifest,
+        `Generated project "${generatedManifest.metadata.title}"`
+      );
       await queueGenerationJobUpdate({
         status: 'completed',
         stage: 'complete',
         progress: 100,
-        projectId: generatedManifest.id,
-        message: `Generated ${generatedManifest.scenes?.length || 0} verified scene beats.`,
+        projectId: committedManifest.id,
+        message: `Generated ${committedManifest.scenes?.length || 0} verified scene beats.`,
         result: {
-          projectId: generatedManifest.id,
-          title: generatedManifest.metadata?.title || '',
-          revision: generatedManifest.metadata?.revision || 1,
-          sceneCount: generatedManifest.scenes?.length || 0
+          projectId: committedManifest.id,
+          title: committedManifest.metadata?.title || '',
+          revision: committedManifest.metadata?.revision || 1,
+          sceneCount: committedManifest.scenes?.length || 0
         }
       });
 
@@ -1534,24 +1547,36 @@ document.addEventListener('DOMContentLoaded', () => {
     chatInputArea.value = '';
     appendChatMessage('user', text);
 
-    const manifest = ProjectStore.getManifest();
+    let manifest = ProjectStore.getManifest();
     sendChatBtn.disabled = true;
     chatInputArea.disabled = true;
+    cancelDirectorBtn.disabled = false;
     showToast('Gemini is planning a video-use timeline edit...');
 
     try {
-      const response = await AIRushAgent.parseCommand(text, manifest, uiState.activeSceneIndex);
+      await ProjectStore.saveNow('Before Gemini director request');
+      manifest = ProjectStore.getManifest();
+      const response = await AIRushAgent.parseCommand(text, manifest, uiState.activeSceneIndex, {
+        onJobCreated(job) {
+          uiState.activeDirectorJobId = job.id;
+          cancelDirectorBtn.classList.remove('hidden');
+        }
+      });
       appendChatMessage('bot', response.replyText);
-      if (response.action || response.actions?.length) {
+      if (response.requiresConfirmation && (response.action || response.actions?.length)) {
         appendTimelineProposal(response, Number(response.baseRevision || manifest.metadata?.revision || 1));
         showToast('Gemini proposal ready. Review it before applying.', 'success');
       }
     } catch (error) {
-      appendChatMessage('bot', `I could not prepare that timeline edit: ${error.message}`);
-      showToast(`Gemini timeline edit failed: ${error.message}`, 'error');
+      const cancelled = error.code === 'DIRECTOR_CANCELLED';
+      appendChatMessage('bot', cancelled ? 'Director job cancelled. The timeline was not changed.' : `I could not prepare that timeline edit: ${error.message}`);
+      showToast(cancelled ? 'Director job cancelled.' : `Gemini timeline edit failed: ${error.message}`, cancelled ? 'warning' : 'error');
     } finally {
+      uiState.activeDirectorJobId = '';
       sendChatBtn.disabled = false;
       chatInputArea.disabled = false;
+      cancelDirectorBtn.disabled = false;
+      cancelDirectorBtn.classList.add('hidden');
       chatInputArea.focus();
     }
   }
@@ -1880,8 +1905,7 @@ document.addEventListener('DOMContentLoaded', () => {
       sceneText: scene?.text || '',
       visualType: scene?.shotDirection?.visualType,
       visualIntent: scene?.shotDirection?.visualIntent,
-      candidateAcceptanceTest: scene?.shotDirection?.candidateAcceptanceTest,
-      geminiApiKey: AIAssistant.getGeminiKey()
+      candidateAcceptanceTest: scene?.shotDirection?.candidateAcceptanceTest
     };
   }
 
@@ -2185,10 +2209,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const catalogResponse = await fetch('/api/generated-media/placement-catalogs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          geminiApiKey: AIAssistant.getGeminiKey(),
-          scenes: catalogScenes
-        })
+        body: JSON.stringify({ scenes: catalogScenes })
       });
       const catalogPayload = await catalogResponse.json().catch(() => ({}));
       if (!catalogResponse.ok || !catalogPayload.catalog?.catalogId) {
@@ -2678,7 +2699,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function openSettingsModal() {
     elevenLabsApiKeyInput.value = TTSEngine.getElevenLabsKey();
     aiProviderSelect.value = AIAssistant.getProvider();
-    geminiApiKeyInput.value = AIAssistant.getGeminiKey();
     openaiApiKeyInput.value = AIAssistant.getOpenAIKey();
     ollamaUrlInput.value = AIAssistant.getOllamaUrl();
     pexelsApiKeyInput.value = StockAPI.getPexelsKey();
@@ -2691,7 +2711,6 @@ document.addEventListener('DOMContentLoaded', () => {
     TTSEngine.setElevenLabsKey(elevenLabsApiKeyInput.value);
     VoiceProvider.setConfig({ apiKey: elevenLabsApiKeyInput.value });
     AIAssistant.setProvider(aiProviderSelect.value);
-    AIAssistant.setGeminiKey(geminiApiKeyInput.value);
     AIAssistant.setOpenAIKey(openaiApiKeyInput.value);
     AIAssistant.setOllamaUrl(ollamaUrlInput.value);
     StockAPI.setPexelsKey(pexelsApiKeyInput.value);
@@ -2796,7 +2815,6 @@ document.addEventListener('DOMContentLoaded', () => {
   function loadSavedSettings() {
     elevenLabsApiKeyInput.value = TTSEngine.getElevenLabsKey();
     openaiApiKeyInput.value = AIAssistant.getOpenAIKey();
-    geminiApiKeyInput.value = AIAssistant.getGeminiKey();
     pexelsApiKeyInput.value = StockAPI.getPexelsKey();
     pixabayApiKeyInput.value = StockAPI.getPixabayKey();
   }
@@ -3029,6 +3047,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function appendTimelineProposal(response, baseRevision) {
     const actions = timelineProposalActions(response);
     if (actions.length === 0) return;
+    const jobId = response.jobId || response.id || '';
     const proposalId = ++uiState.timelineProposalSerial;
     const card = document.createElement('section');
     card.className = 'timeline-edit-proposal';
@@ -3040,8 +3059,12 @@ document.addEventListener('DOMContentLoaded', () => {
     title.textContent = `Gemini proposal · ${actions.length} edit${actions.length === 1 ? '' : 's'}`;
     const badge = document.createElement('span');
     badge.className = 'proposal-engine-badge';
-    badge.textContent = 'video-use EDL';
+    badge.textContent = 'Gemini tools · staged';
     header.append(title, badge);
+
+    const metadata = document.createElement('p');
+    metadata.className = 'proposal-metadata';
+    metadata.textContent = `Base revision ${baseRevision} · ${response.operationSchemaVersion || '1.0.0'} operation schema${jobId ? ` · job ${jobId}` : ''}`;
 
     const list = document.createElement('ol');
     list.className = 'proposal-action-list';
@@ -3057,40 +3080,110 @@ document.addEventListener('DOMContentLoaded', () => {
     cancelButton.className = 'btn btn-secondary btn-sm';
     cancelButton.type = 'button';
     cancelButton.textContent = 'Discard';
+    const rebaseButton = document.createElement('button');
+    rebaseButton.className = 'btn btn-secondary btn-sm hidden';
+    rebaseButton.type = 'button';
+    rebaseButton.textContent = 'Rebase on Current Timeline';
     const applyButton = document.createElement('button');
     applyButton.className = 'btn btn-primary btn-sm';
     applyButton.type = 'button';
     applyButton.textContent = 'Apply to Timeline';
-    footer.append(cancelButton, applyButton);
-    card.append(header, list, footer);
+    footer.append(cancelButton, rebaseButton, applyButton);
+    card.append(header, metadata, list, footer);
     chatFeed.appendChild(card);
     chatFeed.scrollTop = chatFeed.scrollHeight;
+
+    let resultLine = null;
+    const showResult = (message) => {
+      if (!resultLine) {
+        resultLine = document.createElement('p');
+        resultLine.className = 'proposal-result';
+        card.appendChild(resultLine);
+      }
+      resultLine.textContent = message;
+    };
 
     const settle = (state, message) => {
       card.dataset.state = state;
       applyButton.disabled = true;
       cancelButton.disabled = true;
-      const result = document.createElement('p');
-      result.className = 'proposal-result';
-      result.textContent = message;
-      card.appendChild(result);
+      rebaseButton.disabled = true;
+      showResult(message);
     };
 
-    cancelButton.addEventListener('click', () => {
-      settle('discarded', 'Proposal discarded. The timeline was not changed.');
+    cancelButton.addEventListener('click', async () => {
+      cancelButton.disabled = true;
+      applyButton.disabled = true;
+      try {
+        if (jobId) await AIRushAgent.rejectProposal(jobId);
+        settle('discarded', 'Proposal rejected. The active timeline was not changed.');
+      } catch (error) {
+        cancelButton.disabled = false;
+        applyButton.disabled = false;
+        showResult(`Could not reject the proposal: ${error.message}`);
+      }
     });
 
-    applyButton.addEventListener('click', () => {
-      const currentRevision = Number(ProjectStore.getManifest().metadata?.revision || 1);
-      if (currentRevision !== baseRevision) {
-        settle('stale', 'Timeline changed after this proposal. Ask Gemini again so it can use the latest edit.');
-        showToast('Proposal is stale; no edit was applied.', 'warning');
-        return;
+    applyButton.addEventListener('click', async () => {
+      applyButton.disabled = true;
+      cancelButton.disabled = true;
+      try {
+        if (!jobId) throw new Error('This proposal has no persistent director job id.');
+        await ProjectStore.saveNow('Before Gemini proposal approval');
+        const approval = await AIRushAgent.approveProposal(jobId);
+        ProjectStore.acceptCommittedTransaction(
+          approval.transaction,
+          approval.manifest,
+          response.description || 'Gemini video-use timeline edit'
+        );
+        settle('applied', 'Approved and applied as one undoable transaction. video-use will render this committed revision.');
+        showToast(response.description || 'Gemini timeline proposal applied', 'success');
+      } catch (error) {
+        if (error.code === 'STALE_PROPOSAL') {
+          card.dataset.state = 'stale';
+          rebaseButton.classList.remove('hidden');
+          rebaseButton.disabled = false;
+          cancelButton.disabled = false;
+          showResult('The timeline changed after this proposal. Reject it or rebase Gemini on the current revision.');
+          showToast('Proposal is stale; no edit was applied.', 'warning');
+          return;
+        }
+        applyButton.disabled = false;
+        cancelButton.disabled = false;
+        showResult(`Could not apply the proposal: ${error.message}`);
+        showToast(`Proposal apply failed: ${error.message}`, 'error');
       }
-      const transaction = actions.length === 1 ? actions[0] : { type: 'BATCH_ACTION', actions };
-      ProjectStore.dispatch(transaction, response.description || 'Gemini video-use timeline edit');
-      settle('applied', 'Applied as one undoable transaction. The video-use EDL will use these changes at render time.');
-      showToast(response.description || 'Gemini timeline proposal applied', 'success');
+    });
+
+    rebaseButton.addEventListener('click', async () => {
+      rebaseButton.disabled = true;
+      cancelButton.disabled = true;
+      try {
+        const rebasedJob = await AIRushAgent.rebaseProposal(jobId, ProjectStore.getManifest(), uiState.activeSceneIndex, {
+          onJobCreated(job) {
+            uiState.activeDirectorJobId = job.id;
+            cancelDirectorBtn.classList.remove('hidden');
+          }
+        });
+        const rebasedResponse = {
+          ...rebasedJob,
+          jobId: rebasedJob.id,
+          actions: rebasedJob.operations || [],
+          action: rebasedJob.operations?.length ? { type: 'BATCH_ACTION', actions: rebasedJob.operations } : null
+        };
+        appendChatMessage('bot', rebasedJob.replyText || rebasedJob.summary || 'Gemini rebased the proposal.');
+        if (rebasedResponse.requiresConfirmation && rebasedResponse.actions.length > 0) {
+          appendTimelineProposal(rebasedResponse, rebasedJob.baseRevision);
+        }
+        settle('rebased', 'Superseded by a new Gemini proposal based on the current timeline.');
+      } catch (error) {
+        rebaseButton.disabled = false;
+        cancelButton.disabled = false;
+        showResult(`Could not rebase the proposal: ${error.message}`);
+      } finally {
+        uiState.activeDirectorJobId = '';
+        cancelDirectorBtn.classList.add('hidden');
+      }
     });
   }
 

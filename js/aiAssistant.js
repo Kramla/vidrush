@@ -8,7 +8,6 @@
 
 const AIAssistant = (() => {
   const STORAGE_KEY_OPENAI = 'scriptflow_openai_key';
-  const STORAGE_KEY_GEMINI = 'scriptflow_gemini_key';
   const STORAGE_KEY_OLLAMA_URL = 'scriptflow_ollama_url';
   const STORAGE_KEY_PROVIDER = 'scriptflow_ai_provider';
 
@@ -19,19 +18,6 @@ const AIAssistant = (() => {
   function setOpenAIKey(key) {
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(STORAGE_KEY_OPENAI, key.trim().replace(/^["']|["']$/g, ''));
-    }
-  }
-
-  function getGeminiKey() {
-    if (typeof localStorage !== 'undefined') {
-      return localStorage.getItem(STORAGE_KEY_GEMINI) || '';
-    }
-    return '';
-  }
-
-  function setGeminiKey(key) {
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(STORAGE_KEY_GEMINI, key.trim().replace(/^["']|["']$/g, ''));
     }
   }
 
@@ -57,10 +43,10 @@ const AIAssistant = (() => {
 
   function hasLiveApiKey() {
     const p = getProvider();
-    if (p === 'gemini') return !!getGeminiKey();
+    if (p === 'gemini') return true;
     if (p === 'openai') return !!getOpenAIKey();
     if (p === 'ollama') return true;
-    return !!getGeminiKey() || !!getOpenAIKey();
+    return true;
   }
 
   /**
@@ -203,13 +189,12 @@ Give punchy, professional, and directly actionable video editing feedback.`;
    * Unified Multi-LLM Gateway (traced Gemini backend / direct fallback / OpenAI / Ollama)
    */
   async function callLLM(prompt, systemPrompt = 'You are a helpful AI assistant.') {
-    const geminiKey = getGeminiKey();
     const openaiKey = getOpenAIKey();
     const ollamaUrl = getOllamaUrl();
     const provider = getProvider();
 
-    // 1. Traced backend Gemini gateway, with direct Gemini only as a server-unavailable fallback.
-    if ((provider === 'gemini' || provider === 'auto') && geminiKey) {
+    // 1. Server-owned Gemini gateway. Gemini keys never enter browser code or storage.
+    if (provider === 'gemini' || provider === 'auto') {
       try {
         const origin = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : 'http://127.0.0.1:8080';
         const backendResponse = await fetch(`${origin}/api/gemini/text`, {
@@ -218,7 +203,6 @@ Give punchy, professional, and directly actionable video editing feedback.`;
           body: JSON.stringify({
             systemPrompt,
             prompt,
-            apiKey: geminiKey,
             operation: 'Gemini assistant text'
           }),
           signal: AbortSignal.timeout(60_000)
@@ -226,28 +210,7 @@ Give punchy, professional, and directly actionable video editing feedback.`;
         const backendPayload = await backendResponse.json().catch(() => ({}));
         if (backendResponse.ok && backendPayload.text) return String(backendPayload.text).trim();
       } catch (error) {
-        console.warn('[AIAssistant] Backend Gemini gateway unavailable, trying direct Gemini', error);
-      }
-
-      try {
-        const cleanKey = geminiKey.trim().replace(/^["']|["']$/g, '');
-        for (const model of ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-flash-latest']) {
-          const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: `${systemPrompt}\n\n${prompt}` }] }]
-            })
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
-              return data.candidates[0].content.parts[0].text.trim();
-            }
-          }
-        }
-      } catch (e) {
-        console.warn('[AIAssistant] Gemini API direct fetch error, trying backend proxy', e);
+        console.warn('[AIAssistant] Server Gemini gateway unavailable', error);
       }
     }
 
@@ -306,8 +269,6 @@ Give punchy, professional, and directly actionable video editing feedback.`;
   const api = {
     getOpenAIKey,
     setOpenAIKey,
-    getGeminiKey,
-    setGeminiKey,
     getOllamaUrl,
     setOllamaUrl,
     getProvider,

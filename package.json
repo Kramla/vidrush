@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check js/app.js && node --check js/exporter.js && node scripts/check-video-use.js",
+    "check": "node --check server.js && node --check directorService.js && node --check js/app.js && node --check js/directorClient.js && node --check js/editingEngine.js && node --check js/exporter.js && node scripts/check-editing-engine.js && node scripts/check-director.js && node scripts/check-video-use.js",
+    "director:check": "node scripts/check-editing-engine.js && node scripts/check-director.js",
     "video-use:check": "node scripts/check-video-use.js"
   },
   "keywords": [],

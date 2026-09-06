@@ -1386,6 +1386,14 @@ body {
   letter-spacing: 0.05em;
 }
 
+.proposal-metadata {
+  margin: 7px 0 0;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  overflow-wrap: anywhere;
+}
+
 .proposal-action-list {
   margin: 10px 0 12px 20px;
   padding: 0;
@@ -1411,7 +1419,8 @@ body {
 }
 
 .timeline-edit-proposal[data-state="discarded"],
-.timeline-edit-proposal[data-state="stale"] {
+.timeline-edit-proposal[data-state="stale"],
+.timeline-edit-proposal[data-state="rebased"] {
   opacity: 0.68;
 }
 

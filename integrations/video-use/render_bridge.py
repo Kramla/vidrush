@@ -48,6 +48,10 @@ def subtitle_style(style):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     renderer = load_renderer()
     renderer.is_hdr_source = lambda _path: False
 
@@ -59,7 +63,8 @@ def main():
     if len(sys.argv) < 2:
         raise SystemExit("An EDL path is required.")
     edl_path = Path(sys.argv[1]).resolve()
-    edl = json.loads(edl_path.read_text(encoding="utf-8"))
+    edl = json.loads(edl_path.read_text(encoding="utf-8-sig"))
+    edl_path.write_text(json.dumps(edl, ensure_ascii=False, indent=2), encoding="utf-8")
     canvas = edl.get("canvas") if isinstance(edl.get("canvas"), dict) else {}
     portrait = int(canvas.get("height") or 1080) > int(canvas.get("width") or 1920)
     renderer.is_portrait_source = lambda _path: portrait

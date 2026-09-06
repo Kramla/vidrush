@@ -25,60 +25,39 @@ const Exporter = (() => {
   }
 
   async function renderMp4Video(manifest, onProgress) {
-    if (onProgress) onProgress('Compiling the Gemini-edited timeline into a video-use EDL...');
-
-    const payload = {
-      project: {
-        id: manifest.id,
-        title: manifest.metadata?.title || 'VidRush Video',
-        format: manifest.metadata?.format || 'documentary',
-        theme: manifest.metadata?.theme || 'cinematic-documentary',
-        aspectRatio: manifest.metadata?.aspectRatio || '16:9',
-        sourcePolicy: manifest.metadata?.sourcePolicy
-      },
-      settings: {
-        fps: manifest.settings?.fps || 30
-      },
-      captionStyle: {
-        preset: manifest.captions?.style || 'hormozi',
-        position: manifest.captions?.position || 'bottom',
-        size: manifest.captions?.fontSize || 44,
-        enabled: manifest.captions?.enabled !== false
-      },
-      backgroundMusic: {
-        enabled: manifest.audio?.backgroundMusic?.enabled !== false,
-        track: manifest.audio?.backgroundMusic?.trackId || 'ambient-cinematic',
-        volume: manifest.audio?.backgroundMusic?.volume || 0.15
-      },
-      voice: VoiceProvider.getRenderConfig(),
-      geminiApiKey: typeof AIAssistant !== 'undefined' ? AIAssistant.getGeminiKey() : '',
-      scenes: (manifest.scenes || []).map((s) => ({
-        id: s.id,
-        text: s.text,
-        caption: s.captionText || s.text,
-        duration: s.durationSec || 4,
-        shotType: s.shotDirection?.shotType,
-        editing: {
-          motion: s.editing?.motion || 'auto',
-          sourceStartSec: s.editing?.sourceStartSec || 0
-        },
-        selectedMedia: s.visual
-      }))
-    };
-
-    const response = await fetch('/api/render', {
+    if (onProgress) onProgress('Creating a persistent video-use final render job...');
+    const response = await fetch('/api/render/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        type: 'final',
+        projectId: manifest.id,
+        projectRevision: manifest.metadata?.revision,
+        label: 'Editor final render',
+        voice: VoiceProvider.getRenderConfig()
+      })
     });
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
-      throw new Error(err.error || `Render job failed with HTTP ${response.status}`);
+      throw new Error(err.error || `Render job creation failed with HTTP ${response.status}`);
     }
-
-    const result = await response.json();
-    return result.render;
+    const created = await response.json();
+    const jobId = created.job?.id;
+    if (!jobId) throw new Error('The render service returned no persistent job id.');
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 30 * 60 * 1000) {
+      const statusResponse = await fetch(`/api/render/jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+      const payload = await statusResponse.json().catch(() => ({}));
+      if (!statusResponse.ok || !payload.job) throw new Error(payload.error || 'Unable to inspect the render job.');
+      const job = payload.job;
+      if (onProgress) onProgress(`${job.message || job.stage} (${Math.round(job.progress || 0)}%)`);
+      if (job.status === 'completed') return job.result;
+      if (job.status === 'failed') throw new Error(job.error || 'The persistent render job failed.');
+      if (job.status === 'cancelled') throw new Error('The persistent render job was cancelled.');
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    throw new Error('The persistent render job exceeded the 30-minute editor wait limit.');
   }
 
   function generateSRT(manifest) {

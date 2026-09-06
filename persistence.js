@@ -70,6 +70,63 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS generation_events_job_created
     ON generation_events(job_id, created_at ASC);
 
+  CREATE TABLE IF NOT EXISTS render_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    project_revision INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    progress REAL NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    input_json TEXT NOT NULL,
+    result_json TEXT,
+    error TEXT,
+    logs_json TEXT NOT NULL DEFAULT '[]',
+    process_id INTEGER,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS render_jobs_updated
+    ON render_jobs(updated_at DESC);
+
+  CREATE INDEX IF NOT EXISTS render_jobs_project
+    ON render_jobs(project_id, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS director_jobs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    status TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    progress REAL NOT NULL DEFAULT 0,
+    message TEXT NOT NULL DEFAULT '',
+    command TEXT NOT NULL,
+    base_revision INTEGER NOT NULL,
+    base_fingerprint TEXT NOT NULL,
+    base_manifest_json TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    operations_json TEXT NOT NULL DEFAULT '[]',
+    staged_manifest_json TEXT,
+    summary TEXT NOT NULL DEFAULT '',
+    tool_trace_json TEXT NOT NULL DEFAULT '[]',
+    usage_json TEXT NOT NULL DEFAULT '{}',
+    result_json TEXT,
+    error TEXT,
+    supersedes_job_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS director_jobs_updated
+    ON director_jobs(updated_at DESC);
+
+  CREATE INDEX IF NOT EXISTS director_jobs_project
+    ON director_jobs(project_id, updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS brand_profiles (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -99,6 +156,10 @@ database.exec(`
 `);
 
 const jobStatuses = new Set(['queued', 'running', 'completed', 'failed', 'cancelled']);
+const renderJobStatuses = new Set(['queued', 'running', 'completed', 'failed', 'cancelled']);
+const renderJobTypes = new Set(['preview', 'draft', 'grade', 'final']);
+const directorJobStatuses = new Set(['queued', 'running', 'awaiting_approval', 'completed', 'approved', 'rejected', 'cancelled', 'failed', 'stale']);
+const terminalDirectorStatuses = new Set(['completed', 'approved', 'rejected', 'cancelled', 'failed', 'stale']);
 
 function nowIso() {
   return new Date().toISOString();
@@ -128,6 +189,121 @@ function publicProjectRow(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+function persistenceError(message, code = 'PERSISTENCE_ERROR', statusCode = 400) {
+  const error = new Error(message);
+  error.code = code;
+  error.statusCode = statusCode;
+  return error;
+}
+
+function requireIdentifier(value, label = 'identifier') {
+  const candidate = String(value || '').trim();
+  if (!/^[A-Za-z0-9._-]{4,160}$/.test(candidate)) throw persistenceError(`Invalid ${label}.`, 'INVALID_IDENTIFIER');
+  return candidate;
+}
+
+function assertValidManifest(manifest, projectManifest) {
+  const issues = projectManifest.validate(manifest);
+  if (issues.length > 0) throw persistenceError(issues[0].message, issues[0].code || 'INVALID_MANIFEST');
+}
+
+function writeProjectRow(manifest, options = {}) {
+  const id = requireIdentifier(manifest.id, 'project id');
+  const timestamp = options.timestamp || nowIso();
+  const title = String(manifest.metadata?.title || 'ScriptFlow Project').trim().slice(0, 180);
+  const revision = manifest.metadata.revision;
+  const manifestJson = JSON.stringify(manifest);
+  const existing = database.prepare('SELECT created_at FROM projects WHERE id = ?').get(id);
+  const createdAt = existing?.created_at || manifest.metadata?.createdAt || timestamp;
+  database.prepare(`
+    INSERT INTO projects (id, title, revision, manifest_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      title = excluded.title,
+      revision = excluded.revision,
+      manifest_json = excluded.manifest_json,
+      updated_at = excluded.updated_at
+  `).run(id, title, revision, manifestJson, createdAt, timestamp);
+  if (options.createVersion !== false) {
+    database.prepare(`
+      INSERT INTO project_versions (project_id, revision, label, manifest_json, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, revision, String(options.label || 'Project transaction').slice(0, 180), manifestJson, timestamp);
+    database.prepare(`
+      DELETE FROM project_versions
+      WHERE project_id = ? AND id NOT IN (
+        SELECT id FROM project_versions WHERE project_id = ? ORDER BY id DESC LIMIT 100
+      )
+    `).run(id, id);
+  }
+  return {
+    project: { id, title, revision, createdAt, updatedAt: timestamp },
+    manifest,
+    versionId: Number(database.prepare('SELECT id FROM project_versions WHERE project_id = ? ORDER BY id DESC LIMIT 1').get(id)?.id || 0)
+  };
+}
+
+function createProject(payload = {}, dependencies = {}) {
+  const projectManifest = dependencies.projectManifest;
+  if (!projectManifest) throw persistenceError('Project manifest dependency is required.', 'SERVER_CONFIGURATION_ERROR', 500);
+  const id = requireIdentifier(payload.id || `proj_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, 'project id');
+  if (database.prepare('SELECT id FROM projects WHERE id = ?').get(id)) throw persistenceError('Project already exists.', 'PROJECT_EXISTS', 409);
+  const manifest = projectManifest.createDefault({
+    id,
+    title: String(payload.title || 'VidRush Documentary Project').slice(0, 180),
+    description: String(payload.description || 'AI-generated long-form video documentary.').slice(0, 1000),
+    format: String(payload.format || 'documentary').slice(0, 80),
+    aspectRatio: payload.aspectRatio === '9:16' ? '9:16' : '16:9',
+    theme: String(payload.theme || 'cinematic-documentary').slice(0, 80),
+    sourcePolicy: payload.sourcePolicy,
+    voiceProvider: ['elevenlabs', 'windows-sapi'].includes(payload.voiceProvider) ? payload.voiceProvider : 'windows-sapi',
+    voiceId: String(payload.voiceId || '').slice(0, 180),
+    voiceName: String(payload.voiceName || '').slice(0, 300)
+  });
+  assertValidManifest(manifest, projectManifest);
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const saved = writeProjectRow(manifest, { label: 'Project created' });
+    database.exec('COMMIT');
+    return saved;
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+function applyProjectTransaction(projectId, transaction, dependencies = {}, options = {}) {
+  const editingEngine = dependencies.editingEngine;
+  const projectManifest = dependencies.projectManifest;
+  if (!editingEngine || !projectManifest) throw persistenceError('Editing dependencies are required.', 'SERVER_CONFIGURATION_ERROR', 500);
+  const id = requireIdentifier(projectId, 'project id');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const row = database.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+    if (!row) throw persistenceError('Project not found.', 'PROJECT_NOT_FOUND', 404);
+    const currentManifest = parseJson(row.manifest_json);
+    assertValidManifest(currentManifest, projectManifest);
+    const expectedRevision = Number(transaction?.meta?.baseRevision);
+    const expectedFingerprint = String(transaction?.meta?.baseFingerprint || '');
+    const currentFingerprint = editingEngine.manifestFingerprint(currentManifest);
+    if (!Number.isInteger(expectedRevision) || !expectedFingerprint) throw persistenceError('Transaction base revision and fingerprint are required.', 'MISSING_TRANSACTION_BASE');
+    if (expectedRevision !== row.revision || expectedFingerprint !== currentFingerprint) throw persistenceError('Project transaction is stale.', 'STALE_TRANSACTION', 409);
+    const prepared = editingEngine.prepareTransaction(currentManifest, transaction, {
+      expectedRevision,
+      allowLoadProject: options.allowLoadProject === true
+    });
+    assertValidManifest(prepared.manifest, projectManifest);
+    const saved = prepared.changed
+      ? writeProjectRow(prepared.manifest, { label: options.label || 'Project transaction', createVersion: options.createVersion !== false })
+      : { project: publicProjectRow(row), manifest: currentManifest, versionId: 0 };
+    database.exec('COMMIT');
+    return { ...saved, transaction: prepared.transaction, changed: prepared.changed };
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function saveProject(manifest, options = {}) {
@@ -198,6 +374,15 @@ function latestProject() {
   return { ...publicProjectRow(row), manifest: parseJson(row.manifest_json, {}) };
 }
 
+function latestValidProject(projectManifest) {
+  const rows = database.prepare('SELECT * FROM projects ORDER BY updated_at DESC LIMIT 100').all();
+  for (const row of rows) {
+    const manifest = parseJson(row.manifest_json);
+    if (manifest && projectManifest.validate(manifest).length === 0) return { ...publicProjectRow(row), manifest };
+  }
+  return null;
+}
+
 function listProjectVersions(projectId, limit = 30) {
   return database.prepare(`
     SELECT id, project_id, revision, label, created_at
@@ -211,19 +396,60 @@ function listProjectVersions(projectId, limit = 30) {
   }));
 }
 
-function restoreProjectVersion(projectId, versionId) {
-  const row = database.prepare(`
-    SELECT manifest_json FROM project_versions WHERE id = ? AND project_id = ?
-  `).get(Number(versionId), safeIdentifier(projectId, 'invalid'));
-  if (!row) return null;
-  const manifest = parseJson(row.manifest_json);
-  if (!manifest) return null;
-  manifest.metadata = {
-    ...(manifest.metadata || {}),
-    revision: Math.max(1, Number(manifest.metadata?.revision) || 1) + 1,
-    updatedAt: nowIso()
-  };
-  return saveProject(manifest, { label: `Restored version ${versionId}` });
+function restoreProjectVersion(projectId, versionId, dependencies = {}) {
+  const editingEngine = dependencies.editingEngine;
+  const projectManifest = dependencies.projectManifest;
+  const id = requireIdentifier(projectId, 'project id');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const currentRow = database.prepare('SELECT * FROM projects WHERE id = ?').get(id);
+    const versionRow = database.prepare('SELECT manifest_json FROM project_versions WHERE id = ? AND project_id = ?').get(Number(versionId), id);
+    if (!currentRow || !versionRow) {
+      database.exec('ROLLBACK');
+      return null;
+    }
+    const current = parseJson(currentRow.manifest_json);
+    const target = parseJson(versionRow.manifest_json);
+    assertValidManifest(current, projectManifest);
+    assertValidManifest(target, projectManifest);
+    const timestamp = nowIso();
+    target.id = current.id;
+    target.metadata.createdAt = current.metadata.createdAt;
+    target.metadata.updatedAt = timestamp;
+    target.metadata.revision = currentRow.revision + 1;
+    const prepared = editingEngine.prepareTransaction(current, {
+      type: 'LOAD_PROJECT',
+      manifest: target,
+      meta: {
+        transactionId: `restore_${versionId}_${Date.now()}`,
+        timestamp,
+        source: 'server-version-restore',
+        baseRevision: currentRow.revision,
+        baseFingerprint: editingEngine.manifestFingerprint(current)
+      }
+    }, { expectedRevision: currentRow.revision, allowLoadProject: true });
+    assertValidManifest(prepared.manifest, projectManifest);
+    const saved = writeProjectRow(prepared.manifest, { label: `Restored version ${versionId}` });
+    database.exec('COMMIT');
+    return { ...saved, transaction: prepared.transaction };
+  } catch (error) {
+    try { database.exec('ROLLBACK'); } catch {}
+    throw error;
+  }
+}
+
+function restoreProjectFingerprint(projectId, fingerprint, dependencies = {}) {
+  const editingEngine = dependencies.editingEngine;
+  const id = requireIdentifier(projectId, 'project id');
+  const expected = String(fingerprint || '');
+  if (!expected) throw persistenceError('A history fingerprint is required.', 'MISSING_FINGERPRINT');
+  const rows = database.prepare('SELECT id, manifest_json FROM project_versions WHERE project_id = ? ORDER BY id DESC LIMIT 100').all(id);
+  const match = rows.find((row) => {
+    const manifest = parseJson(row.manifest_json);
+    return manifest && editingEngine.manifestFingerprint(manifest) === expected;
+  });
+  if (!match) return null;
+  return restoreProjectVersion(id, match.id, dependencies);
 }
 
 function publicJobRow(row, includePayload = false) {
@@ -348,6 +574,325 @@ function listGenerationEvents(jobId, limit = 250) {
   }));
 }
 
+function publicRenderJobRow(row, includePayload = false) {
+  if (!row) return null;
+  const job = {
+    id: row.id,
+    projectId: row.project_id,
+    projectRevision: row.project_revision,
+    type: row.type,
+    status: row.status,
+    stage: row.stage,
+    progress: row.progress,
+    message: row.message,
+    processId: row.process_id || null,
+    error: row.error || '',
+    logs: parseJson(row.logs_json, []),
+    createdAt: row.created_at,
+    startedAt: row.started_at || '',
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || ''
+  };
+  if (includePayload) {
+    job.input = parseJson(row.input_json, {});
+    job.result = parseJson(row.result_json, null);
+  }
+  return job;
+}
+
+function createRenderJob(payload = {}) {
+  const id = safeIdentifier(payload.id, 'renderjob');
+  const projectId = requireIdentifier(payload.projectId, 'project id');
+  const type = renderJobTypes.has(payload.type) ? payload.type : null;
+  if (!type) throw persistenceError('Render job type must be preview, draft, grade, or final.', 'INVALID_RENDER_JOB_TYPE');
+  const timestamp = nowIso();
+  database.prepare(`
+    INSERT INTO render_jobs (
+      id, project_id, project_revision, type, status, stage, progress, message,
+      input_json, result_json, error, logs_json, process_id, created_at,
+      started_at, updated_at, completed_at
+    ) VALUES (?, ?, ?, ?, 'queued', 'queued', 0, ?, ?, NULL, NULL, '[]', NULL, ?, NULL, ?, NULL)
+  `).run(
+    id,
+    projectId,
+    Math.max(1, Number.parseInt(payload.projectRevision, 10) || 1),
+    type,
+    String(payload.message || `${type} render queued.`).slice(0, 500),
+    JSON.stringify(payload.input || {}),
+    timestamp,
+    timestamp
+  );
+  return getRenderJob(id, true);
+}
+
+function updateRenderJob(jobId, patch = {}) {
+  const id = requireIdentifier(jobId, 'render job id');
+  const existing = database.prepare('SELECT * FROM render_jobs WHERE id = ?').get(id);
+  if (!existing) return null;
+  const status = renderJobStatuses.has(patch.status) ? patch.status : existing.status;
+  const timestamp = nowIso();
+  const logs = parseJson(existing.logs_json, []);
+  const incomingLogs = patch.logs || (patch.log ? [patch.log] : []);
+  for (const entry of incomingLogs) {
+    const message = String(typeof entry === 'string' ? entry : entry?.message || '').replace(/[\u0000-\u001F]/g, ' ').trim().slice(0, 1200);
+    if (message) logs.push({
+      at: String(entry?.at || timestamp).slice(0, 40),
+      stream: ['stdout', 'stderr', 'system'].includes(entry?.stream) ? entry.stream : 'system',
+      message
+    });
+  }
+  const processId = patch.processId === undefined
+    ? existing.process_id
+    : (Number.isInteger(Number(patch.processId)) && Number(patch.processId) > 0 ? Number(patch.processId) : null);
+  const completedAt = ['completed', 'failed', 'cancelled'].includes(status) ? (existing.completed_at || timestamp) : null;
+  const startedAt = status === 'running' ? (existing.started_at || timestamp) : existing.started_at;
+  database.prepare(`
+    UPDATE render_jobs
+    SET status = ?, stage = ?, progress = ?, message = ?, result_json = ?, error = ?,
+        logs_json = ?, process_id = ?, started_at = ?, updated_at = ?, completed_at = ?
+    WHERE id = ?
+  `).run(
+    status,
+    String(patch.stage || existing.stage).slice(0, 80),
+    Math.max(0, Math.min(100, Number.isFinite(Number(patch.progress)) ? Number(patch.progress) : existing.progress)),
+    String(patch.message ?? existing.message ?? '').slice(0, 500),
+    patch.result === undefined ? existing.result_json : JSON.stringify(patch.result),
+    patch.error === undefined ? existing.error : (patch.error ? String(patch.error).slice(0, 2000) : null),
+    JSON.stringify(logs.slice(-200)),
+    processId,
+    startedAt,
+    timestamp,
+    completedAt,
+    id
+  );
+  return getRenderJob(id, true);
+}
+
+function getRenderJob(jobId, includePayload = false) {
+  const id = requireIdentifier(jobId, 'render job id');
+  return publicRenderJobRow(database.prepare('SELECT * FROM render_jobs WHERE id = ?').get(id), includePayload);
+}
+
+function listRenderJobs(limit = 30) {
+  return database.prepare('SELECT * FROM render_jobs ORDER BY updated_at DESC LIMIT ?')
+    .all(Math.max(1, Math.min(100, Number(limit) || 30)))
+    .map((row) => publicRenderJobRow(row, false));
+}
+
+function listInterruptedRenderJobs() {
+  return database.prepare("SELECT * FROM render_jobs WHERE status IN ('queued', 'running') ORDER BY created_at ASC")
+    .all()
+    .map((row) => publicRenderJobRow(row, true));
+}
+
+function publicDirectorJobRow(row, includePayload = false) {
+  if (!row) return null;
+  const job = {
+    id: row.id,
+    projectId: row.project_id || '',
+    status: row.status,
+    stage: row.stage,
+    progress: row.progress,
+    message: row.message,
+    command: row.command,
+    baseRevision: row.base_revision,
+    baseFingerprint: row.base_fingerprint,
+    operations: parseJson(row.operations_json, []),
+    summary: row.summary || '',
+    usage: parseJson(row.usage_json, {}),
+    error: row.error || '',
+    supersedesJobId: row.supersedes_job_id || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || ''
+  };
+  if (includePayload) {
+    job.baseManifest = parseJson(row.base_manifest_json, {});
+    job.request = parseJson(row.request_json, {});
+    job.stagedManifest = parseJson(row.staged_manifest_json, null);
+    job.toolTrace = parseJson(row.tool_trace_json, []);
+    job.result = parseJson(row.result_json, null);
+  }
+  return job;
+}
+
+function cleanupDirectorJobs(maxRows = 300, ttlMs = 7 * 24 * 60 * 60 * 1000) {
+  const cutoff = new Date(Date.now() - Math.max(60_000, ttlMs)).toISOString();
+  database.prepare(`
+    DELETE FROM director_jobs
+    WHERE status IN ('completed', 'approved', 'rejected', 'cancelled', 'failed', 'stale')
+      AND updated_at < ?
+  `).run(cutoff);
+  database.prepare(`
+    DELETE FROM director_jobs
+    WHERE status IN ('completed', 'approved', 'rejected', 'cancelled', 'failed', 'stale')
+      AND id NOT IN (SELECT id FROM director_jobs ORDER BY updated_at DESC LIMIT ?)
+  `).run(Math.max(20, Math.min(1000, Number(maxRows) || 300)));
+}
+
+function createDirectorJob(payload = {}) {
+  cleanupDirectorJobs();
+  const id = safeIdentifier(payload.id, 'director');
+  const timestamp = nowIso();
+  const status = directorJobStatuses.has(payload.status) ? payload.status : 'queued';
+  const stage = String(payload.stage || 'queued').slice(0, 80);
+  database.prepare(`
+    INSERT INTO director_jobs (
+      id, project_id, status, stage, progress, message, command, base_revision,
+      base_fingerprint, base_manifest_json, request_json, operations_json,
+      staged_manifest_json, summary, tool_trace_json, usage_json, result_json,
+      error, supersedes_job_id, created_at, updated_at, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    payload.projectId ? safeIdentifier(payload.projectId, 'proj') : null,
+    status,
+    stage,
+    Math.max(0, Math.min(100, Number(payload.progress) || 0)),
+    String(payload.message || 'Gemini director job queued.').slice(0, 500),
+    String(payload.command || '').slice(0, 4000),
+    Math.max(1, Number.parseInt(payload.baseRevision, 10) || 1),
+    String(payload.baseFingerprint || '').slice(0, 180),
+    JSON.stringify(payload.baseManifest || {}),
+    JSON.stringify(payload.request || {}),
+    JSON.stringify(payload.operations || []),
+    payload.stagedManifest ? JSON.stringify(payload.stagedManifest) : null,
+    String(payload.summary || '').slice(0, 2000),
+    JSON.stringify(payload.toolTrace || []),
+    JSON.stringify(payload.usage || {}),
+    payload.result === undefined ? null : JSON.stringify(payload.result),
+    payload.error ? String(payload.error).slice(0, 1200) : null,
+    payload.supersedesJobId ? safeIdentifier(payload.supersedesJobId, 'director') : null,
+    timestamp,
+    timestamp,
+    terminalDirectorStatuses.has(status) ? timestamp : null
+  );
+  return getDirectorJob(id, true);
+}
+
+function updateDirectorJob(jobId, patch = {}) {
+  const id = safeIdentifier(jobId, 'invalid');
+  const existing = database.prepare('SELECT * FROM director_jobs WHERE id = ?').get(id);
+  if (!existing) return null;
+  const status = directorJobStatuses.has(patch.status) ? patch.status : existing.status;
+  const stage = String(patch.stage || existing.stage).slice(0, 80);
+  const progress = Math.max(0, Math.min(100, Number.isFinite(Number(patch.progress)) ? Number(patch.progress) : existing.progress));
+  const message = String(patch.message ?? existing.message ?? '').slice(0, 500);
+  const operationsJson = patch.operations === undefined ? existing.operations_json : JSON.stringify(patch.operations || []);
+  const stagedManifestJson = patch.stagedManifest === undefined
+    ? existing.staged_manifest_json
+    : (patch.stagedManifest ? JSON.stringify(patch.stagedManifest) : null);
+  const summary = String(patch.summary ?? existing.summary ?? '').slice(0, 2000);
+  const toolTraceJson = patch.toolTrace === undefined ? existing.tool_trace_json : JSON.stringify(patch.toolTrace || []);
+  const usageJson = patch.usage === undefined ? existing.usage_json : JSON.stringify(patch.usage || {});
+  const resultJson = patch.result === undefined ? existing.result_json : JSON.stringify(patch.result);
+  const error = patch.error === undefined ? existing.error : (patch.error ? String(patch.error).slice(0, 1200) : null);
+  const timestamp = nowIso();
+  const completedAt = terminalDirectorStatuses.has(status) ? (existing.completed_at || timestamp) : null;
+  database.prepare(`
+    UPDATE director_jobs
+    SET status = ?, stage = ?, progress = ?, message = ?, operations_json = ?,
+        staged_manifest_json = ?, summary = ?, tool_trace_json = ?, usage_json = ?,
+        result_json = ?, error = ?, updated_at = ?, completed_at = ?
+    WHERE id = ?
+  `).run(
+    status,
+    stage,
+    progress,
+    message,
+    operationsJson,
+    stagedManifestJson,
+    summary,
+    toolTraceJson,
+    usageJson,
+    resultJson,
+    error,
+    timestamp,
+    completedAt,
+    id
+  );
+  return getDirectorJob(id, true);
+}
+
+function getDirectorJob(jobId, includePayload = false) {
+  const id = safeIdentifier(jobId, 'invalid');
+  return publicDirectorJobRow(database.prepare('SELECT * FROM director_jobs WHERE id = ?').get(id), includePayload);
+}
+
+function commitDirectorProposal(jobId, dependencies = {}) {
+  const editingEngine = dependencies.editingEngine;
+  const projectManifest = dependencies.projectManifest;
+  const id = requireIdentifier(jobId, 'director job id');
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const directorRow = database.prepare('SELECT * FROM director_jobs WHERE id = ?').get(id);
+    if (!directorRow) throw persistenceError('Director job not found.', 'DIRECTOR_NOT_FOUND', 404);
+    if (directorRow.status !== 'awaiting_approval') throw persistenceError('This proposal is not awaiting approval.', 'INVALID_DIRECTOR_STATE', 409);
+    const projectRow = database.prepare('SELECT * FROM projects WHERE id = ?').get(directorRow.project_id);
+    if (!projectRow) throw persistenceError('The proposal project no longer exists.', 'PROJECT_NOT_FOUND', 404);
+    const currentManifest = parseJson(projectRow.manifest_json);
+    assertValidManifest(currentManifest, projectManifest);
+    const currentFingerprint = editingEngine.manifestFingerprint(currentManifest);
+    if (projectRow.revision !== directorRow.base_revision || currentFingerprint !== directorRow.base_fingerprint) {
+      const timestamp = nowIso();
+      database.prepare(`
+        UPDATE director_jobs SET status = 'stale', stage = 'stale', progress = 100,
+          message = ?, updated_at = ?, completed_at = ? WHERE id = ?
+      `).run('The authoritative active project changed after this proposal. Reject it or rebase it.', timestamp, timestamp, id);
+      database.exec('COMMIT');
+      return { stale: true };
+    }
+    const operations = parseJson(directorRow.operations_json, []);
+    const stagedManifest = parseJson(directorRow.staged_manifest_json, null);
+    const result = parseJson(directorRow.result_json, {});
+    const usage = parseJson(directorRow.usage_json, {});
+    const transaction = {
+      type: 'BATCH_ACTION',
+      actions: operations,
+      operationSchemaVersion: editingEngine.OPERATION_SCHEMA_VERSION,
+      meta: {
+        transactionId: `director_${id}_${usage.proposalCount || 1}`,
+        timestamp: stagedManifest?.metadata?.updatedAt || nowIso(),
+        source: 'gemini-director-approved',
+        baseRevision: directorRow.base_revision,
+        baseFingerprint: directorRow.base_fingerprint,
+        directorJobId: id
+      }
+    };
+    const prepared = editingEngine.prepareTransaction(currentManifest, transaction, { expectedRevision: directorRow.base_revision });
+    if (prepared.stagedFingerprint !== result.stagedFingerprint) throw persistenceError('Staged proposal integrity check failed.', 'PROPOSAL_INTEGRITY_ERROR', 409);
+    assertValidManifest(prepared.manifest, projectManifest);
+    const saved = writeProjectRow(prepared.manifest, { label: `Approved Gemini proposal ${id}` });
+    const timestamp = nowIso();
+    database.prepare(`
+      UPDATE director_jobs SET status = 'approved', stage = 'approved', progress = 100,
+        message = ?, updated_at = ?, completed_at = ? WHERE id = ?
+    `).run('Proposal approved and committed atomically to the active project.', timestamp, timestamp, id);
+    database.exec('COMMIT');
+    return { stale: false, ...saved, transaction, job: getDirectorJob(id, true) };
+  } catch (error) {
+    try { database.exec('ROLLBACK'); } catch {}
+    throw error;
+  }
+}
+
+function listDirectorJobs(limit = 30) {
+  return database.prepare('SELECT * FROM director_jobs ORDER BY updated_at DESC LIMIT ?')
+    .all(Math.max(1, Math.min(100, Number(limit) || 30)))
+    .map((row) => publicDirectorJobRow(row, true));
+}
+
+function recoverInterruptedDirectorJobs() {
+  const timestamp = nowIso();
+  database.prepare(`
+    UPDATE director_jobs
+    SET status = 'failed', stage = 'interrupted', progress = 100,
+        message = 'Server restarted before this director job completed.',
+        error = 'Interrupted by server restart.', updated_at = ?, completed_at = ?
+    WHERE status IN ('queued', 'running')
+  `).run(timestamp, timestamp);
+}
+
 function defaultBrandProfile() {
   const timestamp = nowIso();
   return {
@@ -438,23 +983,38 @@ function setMediaEmbedding(assetKey, model, embedding, metadata = null) {
 }
 
 module.exports = {
+  applyProjectTransaction,
+  commitDirectorProposal,
+  cleanupDirectorJobs,
+  createProject,
+  createDirectorJob,
   databasePath,
   createGenerationJob,
+  createRenderJob,
   deleteBrandProfile,
   getCachedSearch,
+  getDirectorJob,
   getGenerationJob,
   getMediaEmbedding,
+  getRenderJob,
   latestProject,
+  latestValidProject,
   listBrandProfiles,
+  listDirectorJobs,
   listGenerationEvents,
   listGenerationJobs,
   listProjects,
   listProjectVersions,
+  listRenderJobs,
+  listInterruptedRenderJobs,
   loadProject,
   restoreProjectVersion,
+  restoreProjectFingerprint,
+  recoverInterruptedDirectorJobs,
   saveBrandProfile,
-  saveProject,
   setCachedSearch,
   setMediaEmbedding,
-  updateGenerationJob
+  updateDirectorJob,
+  updateGenerationJob,
+  updateRenderJob
 };
